@@ -372,6 +372,10 @@ if PAGE == "doc":
                            accept_multiple_files=True, key="sum_up")
     txt = st.text_area("요청사항 (문서를 올렸다면 원하는 작업을 적으세요) 또는 요약할 텍스트", height=130, key="sum_txt",
                        placeholder="예) 첨부 문서의 그림과 표를 추출해서 각각 설명을 정리해 HWPX로 만들어줘\n예) 성능 요구사항 위주로 요약해줘")
+    form_mode = st.radio("서식(HWPX)을 함께 올렸을 때 작성 방식",
+                         ["정밀 검토 (규칙 점검 + 원문 인용 확인 + 3회 교차 확인, 보고서당 5~15분)", "빠른 작성 (보고서당 약 30초)"],
+                         horizontal=True, key="form_mode",
+                         help="정밀 검토: 참조 누락·수치 불일치·가중치 재계산 같은 기계적 결함은 코드가 찾고, AI 의견은 원문 인용이 확인된 것만 씁니다.")
     TASKS = ["자동 판단", "요약 · 요청 처리", "그림·표 추출 정리"]
     c1, c2 = st.columns([2, 3])
     task_sel = c1.selectbox("작업 종류", TASKS, key="sum_task")
@@ -402,6 +406,7 @@ if PAGE == "doc":
         task = detect_task(txt.strip()) if task_sel == TASKS[0] else task_sel
         SS.results["sum_images"] = None
         SS.results["form_out"] = None
+        SS.results["form_evidence"] = None
         SS.results["sum_src"] = source if texts else ""
         SS.results["sum_order"] = ("hwpx", "docx", "pdf", "md") if "hwpx" in instr.lower() or "한글" in instr else ("md", "pdf", "docx", "hwpx")
         st.caption(f"🧭 판단된 작업: **{task}**" + (f" · 요청: {instr[:80]}" if instr else ""))
@@ -440,8 +445,10 @@ if PAGE == "doc":
                 def prog(f, m):
                     bar.progress(min(f, 1.0))
                     stt.update(label=m)
-                res = ff.run(form[0], form[1], texts, llm_client.chat, instr, prog)
+                res = ff.run(form[0], form[1], texts, llm_client.chat, instr, prog,
+                             raw={f.name: f.getvalue() for f in ups or []}, precise=form_mode.startswith("정밀"))
                 stt.update(label=f"✅ 서식 작성 완료 — 보고서 {len(res['matched'])}건", state="complete")
+            SS.results["form_evidence"] = res.get("evidence")
             if res["unmatched"]:
                 st.warning("서식의 다음 칸에 맞는 원문 파일을 찾지 못해 비워 두었습니다: " + " / ".join(res["unmatched"]))
             for k, v in res["numcheck"].items():
@@ -493,6 +500,21 @@ if PAGE == "doc":
             _fn, _fd = SS.results["form_out"]
             st.download_button(f"⬇ 작성된 서식 내려받기 ({_fn})", _fd, _fn, "application/octet-stream",
                                key="form_dl", type="primary", icon=":material/download:")
+            _ev = SS.results.get("form_evidence")
+            if _ev:
+                import io as _io, json as _json, zipfile as _zf
+                _b = _io.BytesIO()
+                with _zf.ZipFile(_b, "w", _zf.ZIP_DEFLATED) as _z:
+                    for _k, _fname in (("자동점검", "자동점검_보고서별.json"), ("LLM검토_원본", "LLM검토_원본.json"),
+                                       ("폐기항목", "폐기항목_사유.json"), ("채택근거", "채택근거.json")):
+                        _z.writestr(_fname, _json.dumps(_ev.get(_k, {}), ensure_ascii=False, indent=1, default=str))
+                st.download_button("⬇ 검토 근거 내려받기 (자동점검·AI 원본·폐기 사유 JSON)", _b.getvalue(), "검토근거.zip",
+                                   "application/zip", key="form_ev_dl", icon=":material/folder_zip:")
+                with st.expander("🔧 자동 점검(규칙) 결과 보기"):
+                    for _t, _rs in _ev.get("자동점검", {}).items():
+                        st.markdown(f"**{_t}**")
+                        for _r in _rs:
+                            st.markdown(f"- [{_r['유형']}] {_r['내용']} (p.{', '.join(map(str, _r['쪽'][:5]))})")
         show_doc(SS.results["sum"], SS.results.get("sum_images"))
         show_numcheck(SS.results["sum"], SS.results.get("sum_src", ""), "sum")
         download_row(SS.results["sum"], "sum", order=SS.results.get("sum_order", ("md", "pdf", "docx", "hwpx")),

@@ -16,7 +16,10 @@ import zipfile
 from lxml import etree
 
 HP = "http://www.hancom.co.kr/hwpml/2011/paragraph"
-NS = {"hp": HP}
+HH = "http://www.hancom.co.kr/hwpml/2011/head"
+HC = "http://www.hancom.co.kr/hwpml/2011/core"
+NS = {"hp": HP, "hh": HH, "hc": HC}
+HANG = 950            # 'O ' 폭(10pt 기준, HWPUNIT) — 줄이 넘어가면 이 위치에 맞춤(내어쓰기)
 BULLET = re.compile(r"^\s*(?:O|o|ㅇ|○|◦|●|•|-|□|■|※)?\s*$")
 CIRCLED = {c: str(i) for i, c in enumerate("①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳", 1)}
 FORM_WORD = re.compile(r"양식|서식|형식|틀|준수|채워|작성\s*칸")
@@ -75,7 +78,7 @@ def parse_form(data: bytes) -> dict:
             sym = _para_text(c["paras"][0]).strip() or "O"
             slots.append({"section": sec, "label": label, "count": sum(1 for p in c["paras"] if _para_text(p).strip()) or 1,
                           "bullet": sym, "cell": c, "tbl": tbl})
-    return {"slots": slots, "root": root, "zipdata": data}
+    return {"slots": slots, "root": root, "zipdata": data, "header": etree.fromstring(z.read("Contents/header.xml"))}
 
 
 def is_form(name: str, data: bytes) -> bool:
@@ -255,17 +258,49 @@ def _grow_row(s, need):
         tsz.set("height", str(int(tsz.get("height", "0")) + delta))
 
 
-def _need_height(cell_el, lines_text, font=1000, spacing=1.6):
+def _need_height(cell_el, lines_text, font=1000, spacing=1.6, indent=0):
     sz, mg = cell_el.find("hp:cellSz", NS), cell_el.find("hp:cellMargin", NS)
     width = int(sz.get("width", "28000")) - (int(mg.get("left", "510")) + int(mg.get("right", "510")) if mg is not None else 1020)
-    per_line = max(10.0, width / font * 0.97)
-    lines = sum(max(1, -(-_text_units(t) // per_line)) for t in lines_text)
-    pad = (int(mg.get("top", "141")) + int(mg.get("bottom", "141")) if mg is not None else 282) + 600
+    per_line = max(10.0, width / font * 1.03)                      # 한글 실측 보정(공백·문장부호가 좁음). 겹치는 것보다 약간 넉넉한 쪽을 택함
+    rest = max(10.0, (width - indent) / font * 1.03)               # 내어쓰기한 둘째 줄부터는 폭이 좁음
+    lines = sum(1 + max(0, -(-(_text_units(t) - per_line) // rest)) for t in lines_text)
+    pad = (int(mg.get("top", "141")) + int(mg.get("bottom", "141")) if mg is not None else 282) + 450
     return int(lines * font * spacing + pad)
 
 
-def fill(form: dict, answers: dict) -> bytes:
-    """answers: {(section, label): [문장…]} → 채운 HWPX 바이트"""
+def _hang_para_pr(header, base_id, hang=HANG):
+    """기존 문단 모양(base_id)을 복사해 내어쓰기(첫 줄 0, 다음 줄부터 hang)를 준 새 문단 모양을 추가하고 id 반환."""
+    props = header.find(".//hh:paraProperties", NS)
+    base = next((p for p in props.findall("hh:paraPr", NS) if p.get("id") == str(base_id)), None)
+    if base is None:
+        return base_id
+    new = copy.deepcopy(base)
+    nid = max(int(p.get("id")) for p in props.findall("hh:paraPr", NS)) + 1
+    new.set("id", str(nid))
+    for mg in new.iter(f"{{{HH}}}margin"):
+        for tag, val in (("intent", -hang), ("left", hang)):
+            el = mg.find(f"hc:{tag}", NS)
+            if el is not None:
+                el.set("value", str(val))
+    props.append(new)
+    props.set("itemCnt", str(len(props.findall("hh:paraPr", NS))))
+    return nid
+
+
+def _new_para(proto, text, para_pr=None):
+    """문단을 단일 run/t 로 새로 만든다(글자 모양은 원래 첫 run 것, 줄 배치 정보 없음 → 한글이 다시 계산)."""
+    p = etree.Element(proto.tag, dict(proto.attrib))
+    if para_pr is not None:
+        p.set("paraPrIDRef", str(para_pr))
+    r0 = proto.find("hp:run", NS)
+    run = etree.SubElement(p, f"{{{HP}}}run", {"charPrIDRef": r0.get("charPrIDRef", "0") if r0 is not None else "0"})
+    etree.SubElement(run, f"{{{HP}}}t").text = text
+    return p
+
+
+def fill(form: dict, answers: dict, hang: bool = True) -> bytes:
+    """answers: {(section, label): [문장…]} → 채운 HWPX 바이트. hang: 줄이 넘어가면 'O ' 다음 글자 위치에 맞춤."""
+    hang_ids = {}
     for s in form["slots"]:
         items = answers.get((s["section"], s["label"]))
         if not items:
@@ -273,21 +308,26 @@ def fill(form: dict, answers: dict) -> bytes:
         cell = s["cell"]
         sub = cell["el"].find("hp:subList", NS)
         proto = next(p for p in cell["paras"] if _para_text(p).strip())
+        base = proto.get("paraPrIDRef", "0")
+        pp = None
+        if hang:
+            if base not in hang_ids:
+                hang_ids[base] = _hang_para_pr(form["header"], base)
+            pp = hang_ids[base]
         for p in list(sub.findall("hp:p", NS)):
             sub.remove(p)
         lines = []
         for it in items:
-            p = copy.deepcopy(proto)
-            _set_para(p, f"{s['bullet']} {it}")
-            sub.append(p)
+            sub.append(_new_para(proto, f"{s['bullet']} {it}", pp))
             lines.append(f"{s['bullet']} {it}")
-        _grow_row(s, _need_height(cell["el"], lines))
+        _grow_row(s, _need_height(cell["el"], lines, indent=HANG if hang else 0))
     xml = etree.tostring(form["root"], xml_declaration=True, encoding="UTF-8", standalone=True)
+    hxml = etree.tostring(form["header"], xml_declaration=True, encoding="UTF-8", standalone=True)
     zi = zipfile.ZipFile(io.BytesIO(form["zipdata"]))
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zo:
         for info in zi.infolist():                                # 순서·압축 방식 그대로(mimetype 맨 앞 무압축)
-            data = xml if info.filename == "Contents/section0.xml" else zi.read(info.filename)
+            data = {"Contents/section0.xml": xml, "Contents/header.xml": hxml}.get(info.filename) or zi.read(info.filename)
             if info.filename == "Preview/PrvText.txt":
                 continue
             zo.writestr(info, data, compress_type=info.compress_type)
@@ -295,8 +335,16 @@ def fill(form: dict, answers: dict) -> bytes:
 
 
 # ------------------------------------------------------------------ 전체
-def run(form_name, form_data, sources, chat_fn, instr="", progress=None):
-    """sources: [(파일명, 본문)] (서식 제외) → {'hwpx','markdown','matched','unmatched','numcheck'}"""
+def _label_kind(label):
+    return "개선사항" if re.search(r"개선|보완|요구|조치", label or "") else "검토의견"
+
+
+def run(form_name, form_data, sources, chat_fn, instr="", progress=None, raw=None, precise=False):
+    """sources: [(파일명, 본문)] (서식 제외), raw: {파일명: 원본 바이트}.
+    precise=True 이면 PDF 원문에 대해 report_review(규칙 점검 + 장 단위 AI 검토 + 인용 검증 + 교차 확인)로 작성.
+    반환: {'hwpx','markdown','matched','unmatched','numcheck','evidence'}"""
+    if precise:
+        return _run_precise(form_name, form_data, sources, chat_fn, progress, raw or {})
     say = progress or (lambda f, m: None)
     form = parse_form(form_data)
     order = []
@@ -323,4 +371,43 @@ def run(form_name, form_data, sources, chat_fn, instr="", progress=None):
     say(1.0, "✅ 서식 채우기 완료")
     unmatched = [s.replace("\n", " ") for s in real if s not in match]
     return {"hwpx": fill(form, answers), "markdown": "\n".join(md), "matched": {k.replace("\n", " "): v[0] for k, v in match.items()},
-            "unmatched": unmatched, "numcheck": numck}
+            "unmatched": unmatched, "numcheck": numck, "evidence": None}
+
+
+def _run_precise(form_name, form_data, sources, chat_fn, progress, raw):
+    import report_review as rr
+    say = progress or (lambda f, m: None)
+    form = parse_form(form_data)
+    order = list(dict.fromkeys(s["section"] for s in form["slots"]))
+    real = [x for x in order if x]
+    match = match_sources(real, sources) if real else ({"": sources[0]} if len(sources) == 1 else {})
+    todo = [s for s in order if s in match]
+    answers, md, ev = {}, [f"# {form_name.rsplit('.', 1)[0].strip()} (정밀 검토 결과)"], {"자동점검": {}, "LLM검토_원본": {}, "폐기항목": {}, "채택근거": {}}
+    numck = {}
+    for i, sec in enumerate(todo):
+        name, text = match[sec]
+        title = sec.replace("\n", " ").strip() or name
+        base = 0.02 + 0.96 * i / max(len(todo), 1)
+        say(base, f"🔎 [{i + 1}/{len(todo)}] {title[:40]} — 규칙 점검·AI 검토 시작")
+        data = raw.get(name)
+        if not data or not name.lower().endswith(".pdf"):           # PDF 가 아니면 쪽 정보가 없어 빠른 방식으로
+            res = write_opinions(chat_fn, sec or name, name, text, [(s["label"] or "의견", s["count"]) for s in form["slots"] if s["section"] == sec])
+            res.pop("_numcheck", None)
+            out = {_label_kind(l): v for l, v in res.items()}
+        else:
+            r = rr.review_report(chat_fn, title, data, say=lambda m, b=base: say(b, f"🔎 [{i + 1}/{len(todo)}] {m}"))
+            out = r["text"]
+            ev["자동점검"][title] = r["rules"]
+            ev["LLM검토_원본"][title] = r["llm_raw"]
+            ev["폐기항목"][title] = r["dropped"]
+            ev["채택근거"][title] = r["findings"]
+        md.append(f"\n## {title}\n")
+        for s in form["slots"]:
+            if s["section"] != sec:
+                continue
+            items = out.get(_label_kind(s["label"]), [])
+            answers[(sec, s["label"])] = items
+            md.append(f"**{s['label'] or '의견'}**\n" + "\n".join(f"- {x}" for x in items) + "\n")
+    say(1.0, "✅ 정밀 검토 완료")
+    return {"hwpx": fill(form, answers), "markdown": "\n".join(md), "matched": {k.replace("\n", " "): v[0] for k, v in match.items()},
+            "unmatched": [s.replace("\n", " ") for s in real if s not in match], "numcheck": numck, "evidence": ev}
