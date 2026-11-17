@@ -153,11 +153,49 @@ def _extract_json(text: str):
         if a != -1 and b > a:
             cand = text[a:b + 1]
     if not cand:
-        return None
+        a = text.find("{")
+        if a == -1:
+            return None
+        cand = text[a:]
     try:
         return json.loads(cand)
     except Exception:
-        return None
+        return _repair_json(text[text.find("{"):] if text.find("{") != -1 else cand)
+
+
+def _close_brackets(s: str):
+    """문자열 밖의 열린 괄호를 순서대로 닫아 준다. 문자열이 열린 채 끝나면 None."""
+    stack, in_str, esc = [], False, False
+    for ch in s:
+        if in_str:
+            esc = (ch == "\\" and not esc)
+            if ch == '"' and not esc:
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack:
+            stack.pop()
+    return None if in_str else s + "".join(reversed(stack))
+
+
+def _repair_json(s: str):
+    """응답이 중간에 잘린 JSON 복구: 뒤에서부터 완결된 '}' 또는 ']' 위치로 자르고 열린 괄호를 닫아 본다(최대 60회)."""
+    s = re.sub(r"\s*```\s*$", "", s.strip())
+    cuts = [i for i, ch in enumerate(s) if ch in "}]"][::-1][:60]
+    for i in cuts:
+        fixed = _close_brackets(re.sub(r",\s*$", "", s[:i + 1]))
+        if fixed is None:
+            continue
+        try:
+            d = json.loads(fixed)
+            if isinstance(d, dict):
+                return d
+        except Exception:
+            continue
+    return None
 
 
 def _norm_bullet(b):

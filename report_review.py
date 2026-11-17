@@ -19,7 +19,7 @@ TOC_LINE = re.compile(r"[·.…]{6,}\s*\d*\s*$")
 
 def load_pages(pdf_bytes: bytes):
     """[{'pdf':1, 'printed':N|None, 'text':..., 'toc':bool}] — 인쇄 쪽번호 기준, 번호 없는 쪽은 앞뒤로 보간."""
-    import fitz
+    import pymupdf as fitz
     fitz.TOOLS.mupdf_display_errors(False)
     fitz.TOOLS.mupdf_display_warnings(False)
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")

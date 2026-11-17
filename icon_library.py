@@ -244,7 +244,7 @@ def png(name: str, color: str = "#000000", icon_set: str = DEFAULT_SET, size: in
     s = svg(name, color, icon_set, size=24)
     if not s:
         return None
-    import fitz
+    import pymupdf as fitz
     doc = fitz.open(stream=s.encode("utf-8"), filetype="svg")
     pg = doc[0]
     z = size / max(pg.rect.width, pg.rect.height)

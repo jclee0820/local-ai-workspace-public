@@ -96,6 +96,8 @@ def _heading_icon(text, used):
 
 
 def to_pdf(text: str, images: dict = None) -> bytes:
+    import logging
+    logging.getLogger("fontTools").setLevel(logging.ERROR)        # 'MERG NOT subset…' 글꼴 축소 경고가 터미널을 채우지 않게
     from fpdf import FPDF
     from fpdf.fonts import FontFace
     pdf = FPDF(format="A4")

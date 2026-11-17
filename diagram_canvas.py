@@ -47,10 +47,35 @@ def validate_mxgraph(xml: str):
 
 
 def fix_mxgraph(xml: str) -> str:
-    """흔한 오류 보정: 누락된 id=0/1 셀 추가, 엣지 geometry 보충."""
+    """흔한 오류 보정: 누락된 id=0/1 셀 추가, 없는 도형을 가리키는 연결선 제거, 좌표 없는 도형·연결선에 geometry 보충."""
     if 'id="0"' not in xml:
         xml = xml.replace("<root>", '<root><mxCell id="0"/><mxCell id="1" parent="0"/>', 1)
-    return xml
+    try:
+        root = ET.fromstring(xml)
+    except ET.ParseError:
+        return xml
+    parent = root.find("root")
+    if parent is None:
+        return xml
+    cells = list(parent.iter("mxCell"))
+    ids = {c.get("id") for c in cells}
+    changed = False
+    for i, c in enumerate(c for c in cells if c.get("vertex") == "1"):
+        g = c.find("mxGeometry")
+        if g is None:
+            g = ET.SubElement(c, "mxGeometry", {"as": "geometry"})
+        if g.get("x") is None or g.get("width") is None:          # 좌표 누락 도형은 격자로 배치
+            g.set("x", g.get("x") or str(40 + (i % 4) * 200)); g.set("y", g.get("y") or str(40 + (i // 4) * 120))
+            g.set("width", g.get("width") or "140"); g.set("height", g.get("height") or "60")
+            changed = True
+    for c in [c for c in cells if c.get("edge") == "1"]:
+        if c.get("source") not in ids or c.get("target") not in ids:
+            parent.remove(c)                                        # 없는 도형을 잇는 선은 지움(나머지 그림은 살림)
+            changed = True
+        elif c.find("mxGeometry") is None:
+            ET.SubElement(c, "mxGeometry", {"relative": "1", "as": "geometry"})
+            changed = True
+    return ET.tostring(root, encoding="unicode") if changed else xml
 
 
 def generate_drawio(description: str, chat_fn, retries: int = 2):

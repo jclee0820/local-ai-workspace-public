@@ -2,7 +2,7 @@
 import io
 import math
 
-import fitz
+import pymupdf as fitz
 fitz.TOOLS.mupdf_display_errors(False)     # 글꼴 정보가 불완전한 PDF의 경고가 터미널을 가득 채우지 않게 (본문 추출에는 영향 없음)
 fitz.TOOLS.mupdf_display_warnings(False)
 from PIL import Image

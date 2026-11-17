@@ -105,7 +105,7 @@ def pdf_pages(data: bytes):
 def _pdf_pages_raw(data: bytes):
     """표는 '| a | b |' 행으로 따로 뽑아 칸 정렬을 지킴
     (그냥 글자만 뽑으면 일정표의 ● 가 몇 월 칸인지 알 수 없게 섞임)."""
-    import fitz
+    import pymupdf as fitz
     fitz.TOOLS.mupdf_display_errors(False)
     fitz.TOOLS.mupdf_display_warnings(False)
     doc = fitz.open(stream=data, filetype="pdf")
@@ -283,7 +283,15 @@ def parse_rtf(data: bytes) -> str:
     return re.sub(r"\n{3,}", "\n\n", s).strip()
 
 
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f￾￿]")
+
+
 def extract_text(filename: str, data: bytes) -> str:
+    """모든 형식 공통: 제어문자(글꼴 정보가 깨진 PDF 표지 등)를 지운 글을 돌려준다 — 워드·엑셀·한글 저장 오류 방지."""
+    return _CTRL.sub("", _extract_text(filename, data))
+
+
+def _extract_text(filename: str, data: bytes) -> str:
     ext = os.path.splitext(filename)[1].lower()
     if ext == ".hwp":
         return _disk_cache("hwp", data, lambda: parse_hwp(data))
@@ -522,8 +530,11 @@ def _lex(col):
         got = col.get(include=["documents", "metadatas"])
         vec = TfidfVectorizer(analyzer="char", ngram_range=(2, 3), sublinear_tf=True, preprocessor=_norm,
                               max_features=400000, dtype="float32")
-        _LEX.update(ids=got["ids"], docs=got["documents"], metas=got["metadatas"], vec=vec,
-                    mat=vec.fit_transform(got["documents"]))
+        import warnings
+        with warnings.catch_warnings():                            # float32 사용 경고(메모리 절약을 위해 일부러 씀) 숨김
+            warnings.simplefilter("ignore", UserWarning)
+            mat = vec.fit_transform(got["documents"])
+        _LEX.update(ids=got["ids"], docs=got["documents"], metas=got["metadatas"], vec=vec, mat=mat)
     return _LEX
 
 

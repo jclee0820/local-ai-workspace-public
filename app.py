@@ -169,6 +169,14 @@ def _cached_file(fmt, text, tpl, img_keys, _images):
     return make_file(fmt, text, _images)
 
 
+def show_html(html_text: str, height: int = 600, scrolling: bool = True):
+    """HTML 미리보기. Streamlit 이 없애기로 한 components.html 대신 st.iframe 사용(같은 동작, 경고 없음).
+    이 앱이 만든 HTML(웹페이지·다이어그램·마인드맵·보관함 결과물)만 넘긴다."""
+    if hasattr(st, "iframe"):
+        st.iframe(html_text, height=int(height))
+    else:                                                      # 예전 Streamlit
+        components.html(html_text, height=height, scrolling=scrolling)
+
 def download_row(text: str, key: str, order=("md", "pdf", "docx", "hwpx"), stem="결과물", images=None):
     mime = {"md": "text/markdown", "pdf": "application/pdf",
             "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -570,7 +578,7 @@ if PAGE == "slides":
               if tp.lower().endswith(".pdf"):
                   import pdf_template as pt
                   try:
-                      import fitz
+                      import pymupdf as fitz
                       n_pages = pt.page_count(tp)
                       ac, ab, ae = pt.auto_pages(fitz.open(tp))
                       thumbs = pt.page_thumbnails(tp, 12)
@@ -768,7 +776,7 @@ if PAGE == "web":
         _t = _re2.search(r"<title>(.*?)</title>", SS.results["html"], _re2.S)
         remember("web", (_t.group(1).strip() if _t else "") or (SS.get("web_desc") or "웹페이지")[:60],
                  None, {"page.html": SS.results["html"].encode("utf-8")})
-        components.html(SS.results["html"], height=650, scrolling=True)
+        show_html(SS.results["html"], height=650, scrolling=True)
         st.download_button("⬇ HTML 파일 다운로드", SS.results["html"].encode("utf-8"), "page.html", "text/html", key="html_dl")
         with st.expander("HTML 코드 보기"):
             st.code(SS.results["html"], language="html")
@@ -789,17 +797,17 @@ if PAGE == "diagram":
         if SS.results.get("drawio"):
             ok, msg, nv, ne = dc.validate_mxgraph(SS.results["drawio"])
             st.caption(f"노드 {nv}개 / 연결선 {ne}개 · 박스 드래그=이동, 더블클릭=글자 수정 · 인터넷 연결 필요(embed.diagrams.net)")
-            components.html(dc.drawio_embed_html(SS.results["drawio"], 750), height=770)
+            show_html(dc.drawio_embed_html(SS.results["drawio"], 750), height=770)
             st.download_button("⬇ .drawio 원본 저장(초안)", SS.results["drawio"].encode("utf-8"), "diagram.drawio",
                                "application/xml", key="dio_dl")
         elif SS.results.get("drawio_msg"):
             st.error("다이어그램 XML 생성 실패: " + SS.results["drawio_msg"])
         else:
             st.info("설명을 입력하고 '다이어그램 그리기'를 누르면 빈 캔버스 대신 자동 생성된 도형이 로드됩니다.")
-            components.html(dc.drawio_embed_html('<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel>', 750), height=770)
+            show_html(dc.drawio_embed_html('<mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel>', 750), height=770)
     with t2:
         if SS.results.get("mermaid"):
-            components.html(dc.mermaid_html(SS.results["mermaid"], 560), height=580, scrolling=True)
+            show_html(dc.mermaid_html(SS.results["mermaid"], 560), height=580, scrolling=True)
             with st.expander("Mermaid 코드"):
                 st.code(SS.results["mermaid"])
         else:
@@ -1416,7 +1424,7 @@ if PAGE == "mindmap":
     st.caption(f"노드 {mm.count(tree)}개 · {mm.depth(tree)}단계 · 1단계 가지 {len(tree['c'])}개"
                + (f" · ✓ 자료에서 확인된 항목 {len(marks)}개 (초록 표시, 나머지는 AI 정리·아이디어)" if marks else ""))
     L = mm.layout(tree)
-    components.html(mm.to_html(tree, height=min(max(380, int(L['h'] * 0.75)), 640), marks=marks),
+    show_html(mm.to_html(tree, height=min(max(380, int(L['h'] * 0.75)), 640), marks=marks),
                     height=min(max(380, int(L['h'] * 0.75)), 640) + 8)
     if SS["mm_ref"]:
         with st.expander("🔍 AI가 참고한 지식보관함·웹 자료 보기"):
@@ -1502,7 +1510,7 @@ if PAGE == "mindmap":
                                key="mm_out_dl", type="primary")
         else:
             st.download_button(f"⬇ {out[2]}", out[1].encode("utf-8"), out[2], "text/html", key="mm_out_dl", type="primary")
-            components.html(out[1], height=600, scrolling=True)
+            show_html(out[1], height=600, scrolling=True)
 
 
 # ---- 작업 보관함
@@ -1552,7 +1560,7 @@ if PAGE == "history":
                     c.download_button(f"⬇ {f}", history.read_file(iid, f), f, mime.get(os.path.splitext(f)[1], None),
                                       key=f"hdl_{iid}_{f}", width="stretch")
                 if m["kind"] == "web" and "page.html" in m["files"] and st.toggle("미리보기", key=f"hprev_{iid}"):
-                    components.html(history.read_file(iid, "page.html").decode("utf-8", "ignore"), height=520, scrolling=True)
+                    show_html(history.read_file(iid, "page.html").decode("utf-8", "ignore"), height=520, scrolling=True)
             with st.popover("삭제", icon=":material/delete:"):
                 st.write("이 결과물을 보관함에서 지울까요? 되돌릴 수 없습니다.")
                 if st.button("지우기", key=f"hdel_{iid}", type="primary"):

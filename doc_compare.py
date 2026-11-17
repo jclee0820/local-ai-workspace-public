@@ -91,6 +91,8 @@ def _pair_block(olds, news, rows):
 
 def compare(old_text: str, new_text: str) -> dict:
     """반환: {'rows':[{kind,label,old,new,old_seg,new_seg}], 'mode', 'stats':{수정,신설,삭제,동일}, 'similarity'}"""
+    ctrl = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f￾￿]")   # 깨진 글꼴 PDF의 제어문자: 워드·엑셀 저장을 막음
+    old_text, new_text = ctrl.sub("", old_text or ""), ctrl.sub("", new_text or "")
     ua, ma = split_units(old_text)
     ub, mb = split_units(new_text)
     rows, same = [], 0
@@ -187,8 +189,26 @@ def to_markdown(res: dict, old_name="현행", new_name="개정안") -> str:
     return "\n".join(out)
 
 
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f￾￿]")
+
+
+def _clean_res(res):
+    """저장 직전 한 번 더: 표의 모든 글자에서 제어문자 제거(워드·엑셀은 제어문자가 있으면 저장 실패)."""
+    rows = []
+    for r in res.get("rows", []):
+        r = dict(r)
+        for k in ("label", "old", "new"):
+            r[k] = _CTRL.sub("", r.get(k) or "")
+        for k in ("old_seg", "new_seg"):
+            r[k] = [(_CTRL.sub("", t), f) for t, f in (r.get(k) or [])]
+        rows.append(r)
+    return {**res, "rows": rows}
+
+
 def to_docx(res: dict, old_name="현행", new_name="개정안", summary: str = "") -> bytes:
     """가로 A4 신구대조표. 개정안의 바뀐 글자는 굵은 밑줄(파랑), 현행의 지워진 글자는 취소선(빨강)."""
+    res, summary = _clean_res(res), _CTRL.sub("", summary or "")
+    old_name, new_name = _CTRL.sub("", old_name), _CTRL.sub("", new_name)
     import docx
     from docx.enum.section import WD_ORIENT
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -253,6 +273,8 @@ def to_docx(res: dict, old_name="현행", new_name="개정안", summary: str = "
 
 
 def to_xlsx(res: dict, old_name="현행", new_name="개정안") -> bytes:
+    res = _clean_res(res)
+    old_name, new_name = _CTRL.sub("", old_name), _CTRL.sub("", new_name)
     import xlsxwriter
     buf = io.BytesIO()
     wb = xlsxwriter.Workbook(buf, {"in_memory": True})
