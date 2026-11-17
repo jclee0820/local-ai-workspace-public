@@ -1,0 +1,16 @@
+{
+  "70": {"class_type": "UNETLoader", "inputs": {"unet_name": "flux-2-klein-4b.safetensors", "weight_dtype": "default"}, "_meta": {"title": "UNET"}},
+  "71": {"class_type": "CLIPLoader", "inputs": {"clip_name": "qwen_3_4b.safetensors", "type": "flux2", "device": "default"}, "_meta": {"title": "CLIP"}},
+  "72": {"class_type": "VAELoader", "inputs": {"vae_name": "flux2-vae.safetensors"}, "_meta": {"title": "VAE"}},
+  "74": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["71", 0], "text": ""}, "_meta": {"title": "POSITIVE"}},
+  "76": {"class_type": "ConditioningZeroOut", "inputs": {"conditioning": ["74", 0]}, "_meta": {"title": "NEGATIVE_ZERO"}},
+  "63": {"class_type": "CFGGuider", "inputs": {"model": ["70", 0], "positive": ["74", 0], "negative": ["76", 0], "cfg": 1}, "_meta": {"title": "GUIDER"}},
+  "61": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}, "_meta": {"title": "SAMPLER_SELECT"}},
+  "62": {"class_type": "Flux2Scheduler", "inputs": {"steps": 4, "width": 1024, "height": 1024}, "_meta": {"title": "SCHEDULER"}},
+  "73": {"class_type": "RandomNoise", "inputs": {"noise_seed": 0}, "_meta": {"title": "NOISE"}},
+  "66": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": 1024, "height": 1024, "batch_size": 1}, "_meta": {"title": "LATENT"}},
+  "64": {"class_type": "SamplerCustomAdvanced", "inputs": {"noise": ["73", 0], "guider": ["63", 0], "sampler": ["61", 0],
+         "sigmas": ["62", 0], "latent_image": ["66", 0]}, "_meta": {"title": "SAMPLE"}},
+  "65": {"class_type": "VAEDecode", "inputs": {"samples": ["64", 0], "vae": ["72", 0]}, "_meta": {"title": "DECODE"}},
+  "9": {"class_type": "SaveImage", "inputs": {"images": ["65", 0], "filename_prefix": "imagegen/flux2-klein-4b"}, "_meta": {"title": "SAVE"}}
+}

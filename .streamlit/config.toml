@@ -1,0 +1,45 @@
+# 따뜻한 미색 + 테라코타 포인트, 세리프 제목의 미니멀 테마 (라이트/다크 자동)
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+font = "Noto Sans KR:https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700&display=swap"
+headingFont = "Noto Serif KR:https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@500;600;700&display=swap"
+codeFont = "monospace"
+baseFontSize = 15
+headingFontWeights = [600, 600, 600, 600, 600, 600]
+baseRadius = "0.75rem"
+buttonRadius = "0.6rem"
+showWidgetBorder = true
+showSidebarBorder = true
+
+[theme.light]
+primaryColor = "#C96442"
+backgroundColor = "#FAF9F5"
+secondaryBackgroundColor = "#F0EEE6"
+textColor = "#2B2A27"
+linkColor = "#B0533A"
+borderColor = "#E3DED2"
+codeBackgroundColor = "#F0EEE6"
+
+[theme.light.sidebar]
+backgroundColor = "#F3F1EA"
+secondaryBackgroundColor = "#E9E6DC"
+borderColor = "#E3DED2"
+
+[theme.dark]
+primaryColor = "#D97757"
+backgroundColor = "#262624"
+secondaryBackgroundColor = "#30302E"
+textColor = "#F2F0E8"
+linkColor = "#E89A7E"
+borderColor = "#3D3C38"
+codeBackgroundColor = "#30302E"
+
+[theme.dark.sidebar]
+backgroundColor = "#1F1E1D"
+secondaryBackgroundColor = "#2A2927"
+borderColor = "#3D3C38"
