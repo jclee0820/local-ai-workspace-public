@@ -10,7 +10,7 @@ import time
 import rag_engine
 
 STATE_FILE = os.path.join(rag_engine.DB_DIR, "folders.json")
-EXTS = {".pdf", ".hwpx", ".docx", ".txt", ".md"}
+EXTS = {".pdf", ".hwpx", ".docx", ".pptx", ".xlsx", ".csv", ".html", ".htm", ".rtf", ".txt", ".md"}
 CLOUD_ONLY = {".gdoc", ".gsheet", ".gslides", ".gform", ".gdraw"}
 MAX_BYTES = 80 * 2**20
 AUTO_EVERY = 30 * 60          # 화면을 열었을 때 마지막 동기화가 이보다 오래됐으면 자동으로 다시 훑음

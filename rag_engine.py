@@ -200,6 +200,89 @@ def parse_hwp(data: bytes) -> str:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+DOC_TYPES = ["pdf", "hwp", "hwpx", "docx", "pptx", "xlsx", "xlsm", "csv", "tsv", "html", "htm", "rtf", "txt", "md"]
+
+
+def _md_table(rows, limit=200):
+    rows = [[re.sub(r"\s+", " ", str(c if c is not None else "")).strip() for c in r] for r in rows]
+    rows = [r for r in rows if any(r)][:limit]
+    if not rows:
+        return ""
+    w = max(len(r) for r in rows)
+    rows = [r + [""] * (w - len(r)) for r in rows]
+    return "\n".join(["| " + " | ".join(rows[0]) + " |", "|" + "---|" * w] + ["| " + " | ".join(r) + " |" for r in rows[1:]])
+
+
+def parse_pptx(data: bytes) -> str:
+    """슬라이드마다 제목·본문·표·발표자 노트를 '[슬라이드 N]' 단위로."""
+    from pptx import Presentation
+    prs = Presentation(io.BytesIO(data))
+    out = []
+    for i, s in enumerate(prs.slides, 1):
+        parts = []
+        for sh in s.shapes:
+            if getattr(sh, "has_table", False) and sh.has_table:
+                parts.append(_md_table([[c.text for c in r.cells] for r in sh.table.rows]))
+            elif getattr(sh, "has_text_frame", False) and sh.has_text_frame and sh.text_frame.text.strip():
+                parts.append(sh.text_frame.text.strip())
+        if s.has_notes_slide and s.notes_slide.notes_text_frame.text.strip():
+            parts.append("(노트) " + s.notes_slide.notes_text_frame.text.strip())
+        if parts:
+            out.append(f"[슬라이드 {i}]\n" + "\n".join(parts))
+    return "\n\n".join(out)
+
+
+def parse_xlsx(data: bytes) -> str:
+    """시트마다 값(수식은 계산된 값)을 마크다운 표로. 시트당 최대 200행."""
+    import openpyxl
+    wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+    out = []
+    for ws in wb.worksheets:
+        t = _md_table(list(ws.iter_rows(values_only=True)))
+        if t:
+            out.append(f"## 시트: {ws.title}\n{t}")
+    return "\n\n".join(out)
+
+
+def parse_csv(data: bytes, sep=None) -> str:
+    import csv
+    text = parse_text(data)
+    try:
+        dialect = csv.Sniffer().sniff(text[:4000], delimiters=",\t;|") if sep is None else None
+        rows = list(csv.reader(io.StringIO(text), dialect) if dialect else csv.reader(io.StringIO(text), delimiter=sep))
+    except Exception:
+        rows = list(csv.reader(io.StringIO(text), delimiter=sep or ","))
+    return _md_table(rows, limit=500)
+
+
+def parse_html(data: bytes) -> str:
+    raw = parse_text(data)
+    try:
+        import trafilatura
+        t = trafilatura.extract(raw, include_tables=True, output_format="markdown") or ""
+        if len(t) > 200:
+            return t
+    except Exception:
+        pass
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(raw, "lxml")
+    for x in soup(["script", "style", "nav", "footer"]):
+        x.decompose()
+    return re.sub(r"\n{3,}", "\n\n", soup.get_text("\n")).strip()
+
+
+def parse_rtf(data: bytes) -> str:
+    """간단한 RTF 글자 추출(서식 명령 제거, \\'xx 코드페이지 글자와 \\uN 유니코드 처리)."""
+    s = data.decode("latin-1")
+    s = re.sub(r"\{\\(?:fonttbl|colortbl|stylesheet|info|\*)(?:[^{}]|\{[^{}]*\})*\}", "", s)   # 글꼴·색·스타일 표 등 본문 아닌 묶음 제거
+    s = re.sub(r"\\u(-?\d+)\??", lambda m: chr(int(m.group(1)) % 65536), s)
+    s = re.sub(r"(?:\\'([0-9a-fA-F]{2}))+",
+               lambda m: bytes.fromhex(m.group(0).replace("\\'", "")).decode("cp949", "ignore"), s)
+    s = re.sub(r"\\par[d]?\b", "\n", s)
+    s = re.sub(r"\{\\\*[^{}]*\}|\\[a-zA-Z]+-?\d* ?|[{}]", "", s)
+    return re.sub(r"\n{3,}", "\n\n", s).strip()
+
+
 def extract_text(filename: str, data: bytes) -> str:
     ext = os.path.splitext(filename)[1].lower()
     if ext == ".hwp":
@@ -210,8 +293,20 @@ def extract_text(filename: str, data: bytes) -> str:
         return _disk_cache("docx", data, lambda: parse_docx(data))
     if ext == ".hwpx":
         return _disk_cache("hwpx", data, lambda: parse_hwpx(data))
+    if ext == ".pptx":
+        return _disk_cache("pptx", data, lambda: parse_pptx(data))
+    if ext in (".xlsx", ".xlsm"):
+        return _disk_cache("xlsx", data, lambda: parse_xlsx(data))
+    if ext in (".csv", ".tsv"):
+        return parse_csv(data, "\t" if ext == ".tsv" else None)
+    if ext in (".html", ".htm"):
+        return parse_html(data)
+    if ext == ".rtf":
+        return parse_rtf(data)
     if ext in (".txt", ".md"):
         return parse_text(data)
+    if ext in (".doc", ".ppt", ".xls"):
+        raise ValueError(f"예전 형식({ext})은 읽을 수 없습니다. 해당 프로그램에서 {ext}x 로 다시 저장해 올려주세요.")
     raise ValueError(f"지원하지 않는 형식: {ext}")
 
 

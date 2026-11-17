@@ -273,7 +273,7 @@ with st.sidebar:
         if SS.get("use_web"):
             st.radio("검색 모드", ["일반 웹 + 뉴스 통합", "최신 뉴스 전용"], key="web_mode")
             st.slider("검색 결과 개수", 1, 5, 3, key="web_n")
-        files = st.file_uploader("지식보관함에 문서 추가", type=["pdf", "hwp", "hwpx", "docx", "txt", "md"],
+        files = st.file_uploader("지식보관함에 문서 추가", type=rag_engine.DOC_TYPES,
                                  accept_multiple_files=True, key="rag_up")
         if st.button("학습시키기", width="stretch", key="rag_learn") and files:
             bar = st.progress(0.0)
@@ -368,7 +368,7 @@ if PAGE == "doc":
     import figure_table_extractor as fx
     import re as _re
     page_header("문서 요약·추출", "문서를 올리고 원하는 작업을 적으세요. 요약, 요청 처리, 그림·표 추출을 알아서 판단합니다.")
-    ups = st.file_uploader("대상 문서 (여러 개 가능)", type=["pdf", "hwp", "hwpx", "docx", "txt", "md"],
+    ups = st.file_uploader("대상 문서 (여러 개 가능)", type=rag_engine.DOC_TYPES,
                            accept_multiple_files=True, key="sum_up")
     txt = st.text_area("요청사항 (문서를 올렸다면 원하는 작업을 적으세요) 또는 요약할 텍스트", height=130, key="sum_txt",
                        placeholder="예) 첨부 문서의 그림과 표를 추출해서 각각 설명을 정리해 HWPX로 만들어줘\n예) 성능 요구사항 위주로 요약해줘")
@@ -594,15 +594,60 @@ if PAGE == "slides":
                              "본문 쪽은 글자를 넣을 공간이 넓은 페이지를 고르세요.")
               else:
                   st.caption("PPTX는 슬라이드 마스터·레이아웃·폰트 테마를 그대로 상속합니다.")
+    psrc = st.file_uploader("원 소스 보고서 (선택, 여러 개 가능) — 올리면 이 문서 내용만 근거로 슬라이드를 구성합니다",
+                            type=rag_engine.DOC_TYPES, accept_multiple_files=True, key="ppt_src",
+                            help="PDF·한글(HWP/HWPX)·워드·파워포인트·엑셀·CSV·HTML·RTF·TXT·MD")
+    if psrc:
+        pdepth = st.radio("긴 문서 처리 방식",
+                          ["빠르게 (목차·각 절 요점을 골라 구성, 1~2분)", "꼼꼼하게 (문서 전체를 나눠 요약한 뒤 구성, 문서 길이에 따라 수 분~수십 분)"],
+                          horizontal=True, key="ppt_depth")
     c1, c2 = st.columns([3, 1])
-    ptopic = c1.text_area("발표 주제", height=100, key="ppt_topic")
+    ptopic = c1.text_area("발표 주제" + (" (선택 — 비우면 원 소스 보고서 전체를 발표 자료로 구성)" if psrc else ""),
+                          height=100, key="ppt_topic",
+                          placeholder="예) 보고서의 데이터 품질 분석 결과를 경영진 보고용으로" if psrc else "")
     n = c2.number_input("슬라이드 장수(표지 제외)", 3, 15, 6, key="ppt_n")
-    if st.button("구성안 만들기", type="primary", key="ppt_btn", icon=":material/slideshow:") and ptopic.strip():
+    if st.button("구성안 만들기", type="primary", key="ppt_btn", icon=":material/slideshow:") and (ptopic.strip() or psrc):
         style_rule = sthemes.THEMES.get(theme, {}).get("style", "")
         narrative = theme == "blue"                # 블루 테마는 존댓말 평서체 → 개조식 자동 교정 끔
-        raw = generate(f"'{ptopic}' 주제로 본문 슬라이드 {int(n)}장 구성안을 작성하라.\n"
-                       + (f"[문체] {style_rule}\n" if style_rule else "") + SLIDE_SCHEMA, ptopic, "", "ppt",
-                       preset_override="④ 일반 비즈니스 서술형 (~입니다 체)" if narrative else None)
+        src_texts, src_ctx = [], ""
+        for f in psrc or []:
+            try:
+                src_texts.append((f.name, rag_engine.extract_text(f.name, f.getvalue())))
+            except Exception as e:
+                st.error(f"{f.name} 읽기 실패: {e}")
+        if src_texts:
+            whole = "\n\n".join(f"===== {nm} =====\n{t}" for nm, t in src_texts)
+            if len(whole) <= 7000:
+                src_ctx = whole
+            elif SS.get("ppt_depth", "").startswith("꼼꼼"):
+                bar = st.progress(0.0)
+                with st.status("🔄 원 소스 보고서 전체 요약 중", expanded=True) as stt:
+                    def prog(fr, m):
+                        bar.progress(min(fr, 1.0))
+                        stt.update(label=m)
+                    r = mrs.summarize(whole, progress=prog, doc_name=", ".join(nm for nm, _ in src_texts),
+                                      extra_instruction="발표 슬라이드 구성용: 장·절 흐름, 핵심 수치, 표, 결론·시사점을 빠짐없이 보존")
+                    stt.update(label=f"✅ 요약 완료 ({r['chunks']}개 조각)", state="complete")
+                src_ctx = r["result"][:9000]
+            else:
+                import form_fill as _ff
+                per = max(2500, 7000 // len(src_texts))
+                src_ctx = "\n\n".join(f"===== {nm} =====\n{_ff.digest(t, per)}" for nm, t in src_texts)
+        if src_ctx:
+            names = ", ".join(nm for nm, _ in src_texts)
+            ask = (f"아래 [원 소스 보고서]({names})를 바탕으로 본문 슬라이드 {int(n)}장 구성안을 작성하라.\n"
+                   + (f"[발표 초점] {ptopic.strip()}\n" if ptopic.strip() else "[발표 초점] 보고서 전체 내용을 목차 흐름대로\n")
+                   + "- 보고서의 장·절 흐름을 따르고, 수치·표·고유명사는 원문 그대로 쓴다. 원문에 없는 내용·수치는 만들지 않는다.\n"
+                     "- 원문에 표가 있으면 핵심 표를 table 로 옮긴다. source 에는 원문 파일명과 장·절(또는 쪽)을 적는다.\n"
+                   + (f"[문체] {style_rule}\n" if style_rule else "") + SLIDE_SCHEMA)
+            raw = generate(ask, ptopic.strip() or names, src_ctx, "ppt",
+                           preset_override="④ 일반 비즈니스 서술형 (~입니다 체)" if narrative else None)
+            SS.results["ppt_src"] = "\n\n".join(t for _, t in src_texts)
+        else:
+            raw = generate(f"'{ptopic}' 주제로 본문 슬라이드 {int(n)}장 구성안을 작성하라.\n"
+                           + (f"[문체] {style_rule}\n" if style_rule else "") + SLIDE_SCHEMA, ptopic, "", "ppt",
+                           preset_override="④ 일반 비즈니스 서술형 (~입니다 체)" if narrative else None)
+            SS.results["ppt_src"] = ""
         SS.results["ppt_raw"] = raw
         SS.results["ppt"] = parse_slides(raw)
     d = SS.results.get("ppt")
@@ -625,6 +670,11 @@ if PAGE == "slides":
                         st.caption("자료: " + s["source"])
                     if s["notes"]:
                         st.caption("🗒️ 발표자 노트: " + s["notes"])
+            if SS.results.get("ppt_src"):                         # 원 소스 기반이면 슬라이드 속 수치를 원문과 대조
+                _st = "\n".join([s["title"] + " " + (s.get("keypoint") or "") for s in d["slides"]]
+                                + [t for s in d["slides"] for _, t in s["bullets"]]
+                                + [" ".join(r) for s in d["slides"] if s["table"] for r in s["table"]])
+                show_numcheck(_st, SS.results["ppt_src"], "ppt")
             try:
                 p = tpl_path("pptx") if theme == "custom" else None
                 if theme in sthemes.THEMES:
@@ -763,7 +813,7 @@ if PAGE == "gantt":
     page_header("WBS · 간트 차트", "연구개발계획서·제안서·과업지시서를 올리면 작업분류체계(WBS)와 일정을 뽑아 "
                 "엑셀 간트 차트로 만듭니다. 화면에서 고친 뒤 내려받을 수 있습니다.")
     gups = st.file_uploader("계획서·제안서 (PDF, HWP, HWPX, DOCX, TXT · 여러 개 가능)",
-                            type=["pdf", "hwp", "hwpx", "docx", "txt", "md"], accept_multiple_files=True, key="gantt_up")
+                            type=rag_engine.DOC_TYPES, accept_multiple_files=True, key="gantt_up")
     greq = st.text_area("추가 요청 (선택)", height=70, key="gantt_req",
                         placeholder="예) 2차년도 과업까지 3수준으로 나눠줘 / 보고·검수 일정을 마일스톤으로 넣어줘")
     g1, g2, g3 = st.columns(3)
@@ -964,7 +1014,7 @@ if PAGE == "chat":
             _render_artifacts(m.get("arts"), mi)
 
     ci = st.chat_input("무엇을 도와드릴까요? (문서는 📎로 첨부)", accept_file="multiple",
-                       file_type=["pdf", "hwp", "hwpx", "docx", "txt", "md"], key="chat_in")
+                       file_type=rag_engine.DOC_TYPES, key="chat_in")
     if ci:
         msg = (ci.text or "").strip() if hasattr(ci, "text") else str(ci)
         files = list(getattr(ci, "files", []) or [])
@@ -1214,7 +1264,7 @@ if PAGE == "compare":
     import doc_compare as dcmp
     page_header("문서 비교", "개정 전·후 문서를 올리면 바뀐 곳을 찾아 신구대조표를 만들고, 주요 변경 사항을 정리합니다.")
     cc1, cc2 = st.columns(2)
-    TYPES = ["pdf", "hwp", "hwpx", "docx", "txt", "md"]
+    TYPES = rag_engine.DOC_TYPES
     f_old = cc1.file_uploader("현행 (이전 문서)", type=TYPES, key="cmp_old")
     f_new = cc2.file_uploader("개정안 (새 문서)", type=TYPES, key="cmp_new")
     with st.expander("파일 없이 글을 붙여 넣어 비교"):
@@ -1306,7 +1356,7 @@ if PAGE == "mindmap":
                    label_visibility="collapsed")
     if how.startswith("📄"):
         mups = st.file_uploader("보고서·계획서·문서 (PDF, HWP, HWPX, DOCX, TXT · 여러 개 가능)",
-                                type=["pdf", "hwp", "hwpx", "docx", "txt", "md"], accept_multiple_files=True, key="mm_up")
+                                type=rag_engine.DOC_TYPES, accept_multiple_files=True, key="mm_up")
         mfocus = st.text_input("정리 방향 (선택)", key="mm_focus", placeholder="예) 추진 전략 중심으로 / 기술 요소만 3단계까지")
         if st.button("마인드맵으로 구조화", type="primary", key="mm_doc_btn", icon=":material/account_tree:") and mups:
             texts = []
