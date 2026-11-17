@@ -12,7 +12,7 @@ import sys
 import tarfile
 import zipfile
 
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DIST = os.path.join(ROOT, "dist")

@@ -439,11 +439,11 @@ def _section_items(request, sec, ctx, chat_fn, core):
     return d.get("intro", ""), d.get("items", []) or []
 
 
-def build(request: str, chat_fn, progress=None, use_research=True, extra_context="", trend=None):
+def build(request: str, chat_fn, progress=None, use_research=True, extra_context="", trend=None, core=None, allow_product=True):
     """반환: {'html','content','theme','sources','removed','context'}"""
     import fact_research
     import product_builder
-    if use_research and product_builder.is_product_request(request):
+    if use_research and allow_product and product_builder.is_product_request(request):
         return product_builder.build(request, chat_fn, progress, trend=trend)      # 현재 판매 제품·가격·사진 요청 → 웹 검색 기반 제품 가이드
     say = progress or (lambda f, m: None)
     q = {"core": _rule_core(request), "ko": _rule_core(request), "en": "", "qual": ""}
@@ -451,6 +451,10 @@ def build(request: str, chat_fn, progress=None, use_research=True, extra_context
     if use_research:
         say(0.03, "🔑 검색어 추출 중...")
         q = make_queries(request, chat_fn)
+        if core:                                                    # 틀에서 주제를 직접 입력한 경우: 추측하지 않고 그대로 씀
+            qual = re.search(r"\(([^)]{1,12})\)", core)
+            base = re.sub(r"\s*\([^)]*\)", "", core).strip()
+            q.update(core=base, qual=qual.group(1) if qual else "", ko=f"{base} {qual.group(1)}" if qual else base)
         say(0.08, f"🔑 검색어: {q['ko']} / {q['en']}")
         pages = fact_research.collect(request, q["ko"], q["core"], q["en"], q.get("qual", ""),
                                       progress=lambda m: say(0.12, m))

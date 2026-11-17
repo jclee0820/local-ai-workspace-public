@@ -381,7 +381,7 @@ if PAGE == "doc":
     txt = st.text_area("요청사항 (문서를 올렸다면 원하는 작업을 적으세요) 또는 요약할 텍스트", height=130, key="sum_txt",
                        placeholder="예) 첨부 문서의 그림과 표를 추출해서 각각 설명을 정리해 HWPX로 만들어줘\n예) 성능 요구사항 위주로 요약해줘")
     form_mode = st.radio("서식(HWPX)을 함께 올렸을 때 작성 방식",
-                         ["정밀 검토 (규칙 점검 + 원문 인용 확인 + 3회 교차 확인, 보고서당 5~15분)", "빠른 작성 (보고서당 약 30초)"],
+                         ["정밀 검토 (규칙 점검 + 원문 인용 확인 + 3회 교차 확인, 보고서당 5～15분)", "빠른 작성 (보고서당 약 30초)"],
                          horizontal=True, key="form_mode",
                          help="정밀 검토: 참조 누락·수치 불일치·가중치 재계산 같은 기계적 결함은 코드가 찾고, AI 의견은 원문 인용이 확인된 것만 씁니다.")
     TASKS = ["자동 판단", "요약 · 요청 처리", "그림·표 추출 정리"]
@@ -607,7 +607,7 @@ if PAGE == "slides":
                             help="PDF·한글(HWP/HWPX)·워드·파워포인트·엑셀·CSV·HTML·RTF·TXT·MD")
     if psrc:
         pdepth = st.radio("긴 문서 처리 방식",
-                          ["빠르게 (목차·각 절 요점을 골라 구성, 1~2분)", "꼼꼼하게 (문서 전체를 나눠 요약한 뒤 구성, 문서 길이에 따라 수 분~수십 분)"],
+                          ["빠르게 (목차·각 절 요점을 골라 구성, 1～2분)", "꼼꼼하게 (문서 전체를 나눠 요약한 뒤 구성, 문서 길이에 따라 수 분～수십 분)"],
                           horizontal=True, key="ppt_depth")
     c1, c2 = st.columns([3, 1])
     ptopic = c1.text_area("발표 주제" + (" (선택 — 비우면 원 소스 보고서 전체를 발표 자료로 구성)" if psrc else ""),
@@ -703,60 +703,124 @@ if PAGE == "slides":
 
 # ---- 탭 4
 if PAGE == "web":
-    import web_builder
-    page_header("웹페이지", "위키백과 자료로 사실을 확인한 뒤, 주제에 어울리는 디자인으로 한 페이지를 만듭니다.")
-    wdesc = st.text_area("만들고 싶은 웹페이지 설명", height=110, key="web_desc",
-                         placeholder="예) 듄(영화) 시리즈의 세계관, 시리즈별 전개, 주요 등장인물을 보여주는 웹페이지를 듄의 분위기에 맞게 만들어줘")
-    wmode = st.radio("제작 방식", ["📚 정보·소개 페이지 (위키백과 자료 조사 + 사실 검증, 권장)",
-                                 "🎨 자유 디자인 (대시보드·랜딩 화면 등 — 사실 확인 없음)"], key="web_mode_sel")
+    import datetime as _wdt
+    import re as _wre
     import design_trends as dt
-    import product_builder
-    tsel = st.selectbox("디자인 트렌드", dt.ORDER, format_func=dt.label, key="web_trend",
+    import page_templates as ptpl
+    import web_builder
+    page_header("웹페이지", "페이지 틀을 고르고 칸을 채우면, 틀에 맞는 자료를 모아 3D·인터랙티브 부품이 들어간 한 페이지를 만듭니다.")
+    KINDS = list(ptpl.TEMPLATES) + ["free"]
+    wkind = st.radio("1. 페이지 틀", KINDS, horizontal=True, key="web_kind",
+                     format_func=lambda k: f"{ptpl.TEMPLATES[k]['icon']} {ptpl.TEMPLATES[k]['name']}" if k in ptpl.TEMPLATES else "🎨 자유 디자인")
+    if wkind in ptpl.TEMPLATES:
+        _T = ptpl.TEMPLATES[wkind]
+        st.info(f"**{_T['name']}** — {_T['desc']}  \n자료: {_T['src']} · 부품: {_T['parts']}")
+    else:
+        st.info("**자유 디자인** — 설명을 적으면 AI가 HTML을 직접 씁니다(대시보드·랜딩 화면 시안용). 사실 확인과 3D 부품은 없습니다.")
+    st.markdown("**2. 내용**")
+    form = {}
+    if wkind in ("topic", "history"):
+        form["topic"] = st.text_input("주제", key="wt_topic", placeholder="예) 듄(영화) / 지능형교통체계 / 경부고속도로")
+        form["focus"] = st.text_input("강조할 내용 (선택)", key="wt_focus",
+                                      placeholder="예) 세계관과 주요 인물 위주로" if wkind == "topic" else "예) 1990년대 이후 정책 변화 위주로")
+    elif wkind == "list":
+        c1, c2 = st.columns([3, 1])
+        form["topic"] = c1.text_input("무엇을 비교할까요 (분야)", key="wt_list", placeholder="예) 2026년 한국 흥행 영화 / 현재 판매 중인 AI 스마트 글래스")
+        form["n"] = c2.number_input("항목 수", 3, 10, 6, key="wt_n")
+        form["attrs"] = st.text_input("비교 항목 (쉼표로 구분)", key="wt_attrs", placeholder="예) 개봉일, 관객 수, 감독  /  가격, 무게, 배터리")
+        form["photos"] = st.checkbox("항목 사진 찾기 (AI가 직접 보고 맞는 사진만, 항목당 수십 초 추가)", value=True, key="wt_photo")
+    elif wkind in ("org", "report"):
+        if wkind == "org":
+            form["topic"] = st.text_input("기관·사업 이름", key="wt_org", placeholder="예) 스마트 교차로 구축 사업")
+        wsrc = st.file_uploader("원 소스 문서 (여러 개 가능)", type=rag_engine.DOC_TYPES, accept_multiple_files=True, key="wt_src",
+                                help="PDF·한글·워드·파워포인트·엑셀·CSV·HTML·RTF·TXT·MD")
+        if wkind == "org":
+            mk = st.text_area("거점·대상 지역 (선택, 한 줄에 '이름, 위도, 경도') — 넣으면 3D 지구본에 표시", height=80, key="wt_markers",
+                              placeholder="대전, 36.35, 127.38\n세종, 36.48, 127.29")
+            form["markers"] = [{"name": p[0].strip(), "lat": p[1].strip(), "lon": p[2].strip()}
+                               for p in (l.split(",") for l in mk.splitlines()) if len(p) >= 3]
+    elif wkind == "event":
+        form["topic"] = st.text_input("행사 이름", key="we_name", placeholder="예) 스마트시티 기술 세미나")
+        e1, e2, e3 = st.columns(3)
+        _d = e1.date_input("날짜", _wdt.date.today() + _wdt.timedelta(days=14), key="we_date")
+        _tm = e2.time_input("시작 시각", _wdt.time(14, 0), key="we_time")
+        form["when"] = _wdt.datetime.combine(_d, _tm)
+        form["place"] = e3.text_input("장소", key="we_place", placeholder="예) 대전컨벤션센터 2층")
+        form["address"] = st.text_input("주소 (지도 링크용, 선택)", key="we_addr")
+        f1, f2 = st.columns(2)
+        form["audience"] = f1.text_input("대상 (선택)", key="we_aud")
+        form["fee"] = f2.text_input("참가비 (선택)", key="we_fee", placeholder="예) 무료")
+        form["intro"] = st.text_area("소개 (2～3문장)", height=80, key="we_intro")
+        form["program"] = st.text_area("프로그램 (한 줄에 '시간 | 내용 | 발표·담당')", height=110, key="we_prog",
+                                       placeholder="14:00 | 개회사 | 사무국장\n14:10 | 기조연설 | 연구책임자")
+        form["contact"] = st.text_area("문의 (선택)", height=60, key="we_contact")
+        form["apply"] = st.text_input("참가 신청 주소 (선택)", key="we_apply")
+        form["polish"] = st.checkbox("AI로 소개 문구 다듬기", value=False, key="we_polish")
+    else:
+        wdesc = st.text_area("만들고 싶은 화면 설명", height=110, key="web_desc",
+                             placeholder="예) 교통 상황을 보여주는 관제 대시보드 시안 — 상단 지표 카드, 지도 자리, 사건 목록")
+    st.markdown("**3. 디자인**")
+    d1, d2 = st.columns(2)
+    tsel = d1.selectbox("디자인 트렌드", dt.ORDER, format_func=dt.label, key="web_trend",
                         help="만든 뒤에 바꿔도 자료를 다시 조사하지 않고 디자인만 즉시 바뀝니다.")
+    if wkind in ptpl.TEMPLATES:
+        form["hero"] = d2.selectbox("표지 3D 배경", list(ptpl.HEROES), format_func=ptpl.HEROES.get, key="web_hero",
+                                    index=1 if wkind == "org" and form.get("markers") else 0)
+        if wkind in ("list", "org"):
+            form["bars3d"] = st.checkbox("수치는 3D 막대 그래프로 (끌어서 회전)", value=True, key="web_b3")
+        if wkind == "list":
+            form["carousel"] = st.checkbox("사진이 3장 이상이면 3D 회전 갤러리", value=True, key="web_c3")
     st.caption(f"🎨 {dt.TRENDS[tsel]['desc']}")
-    st.caption("제품 종류·가격·사진을 묻는 요청은 자동으로 웹 검색 방식으로 바뀌어 제품별 가격·특징·사진을 찾아 정리합니다(5~10분). "
-               "그 외 정보·소개 페이지: 위키백과(한국어·영어)에서 자료를 모으고, 자료에 근거가 있는 내용만 남깁니다. "
-               "지식보관함(RAG) 토글이 켜져 있으면 내부 문서도 함께 씁니다. 3~5분 정도 걸립니다.")
-    web_clicked = st.button("웹페이지 만들기", type="primary", key="web_btn", icon=":material/web:") and wdesc.strip()
-    if web_clicked and wmode.startswith("📚"):
+    ready = (bool((form.get("topic") or "").strip()) if wkind in ("topic", "history", "list", "org", "event") else True)
+    if wkind in ("org", "report"):
+        ready = ready and bool(wsrc or SS.get("use_rag"))
+    if wkind == "free":
+        ready = bool(wdesc.strip())
+    web_clicked = st.button("웹페이지 만들기", type="primary", key="web_btn", icon=":material/web:", disabled=not ready)
+    if not ready:
+        st.caption("필수 칸을 채우면 버튼이 켜집니다." + (" (원 소스 문서를 올리거나 사이드바에서 지식보관함을 켜세요)" if wkind in ("org", "report") else ""))
+    if web_clicked and wkind in ptpl.TEMPLATES:
+        SS.results["web_meta"] = None
+        if wkind in ("org", "report"):
+            texts, names = [], []
+            for f in wsrc or []:
+                try:
+                    texts.append(rag_engine.extract_text(f.name, f.getvalue()))
+                    names.append(f.name)
+                except Exception as e:
+                    st.error(f"{f.name} 읽기 실패: {e}")
+            if not texts and SS.get("use_rag"):
+                texts = [rag_engine.format_context(rag_engine.search(form.get("topic") or "보고서", k=8, max_chars=8000))]
+                names = ["지식보관함"]
+            form["source_text"], form["source_names"] = "\n\n".join(texts), names
+        elif wkind in ("topic", "history") and SS.get("use_rag"):
+            form["extra"] = rag_engine.format_context(rag_engine.search(form["topic"], k=4, max_chars=2500))
         bar = st.progress(0.0)
-        with st.status("📚 자료 조사 중...", expanded=True) as stt:
+        with st.status("🛠️ 페이지 만드는 중…", expanded=True) as stt:
             def wprog(f, m):
                 bar.progress(min(f, 1.0))
                 stt.update(label=m)
-            extra = ""
-            if SS.get("use_rag"):
-                extra = rag_engine.format_context(rag_engine.search(wdesc, k=4, max_chars=2500))
             try:
-                res = web_builder.build(wdesc, llm_client.chat, wprog, extra_context=extra, trend=tsel)
+                res = ptpl.build(wkind, form, llm_client.chat, wprog, trend=tsel)
                 res["trend"] = tsel
-                SS.results["html"] = res["html"]
-                SS.results["web_meta"] = res
-                if isinstance(res["content"].get("products"), list):
-                    stt.update(label=f"✅ 완료 — 제품 {len(res['content']['products'])}종 (가격 미확인 {res['removed']}종)", state="complete")
-                else:
-                    stt.update(label=f"✅ 완료 — 근거 없는 항목 {res['removed']}개 제외", state="complete")
+                SS.results["html"], SS.results["web_tpl"] = res["html"], res
+                stt.update(label=f"✅ 완료 — 섹션 {len(res['page']['sections'])}개", state="complete")
             except Exception as e:
                 stt.update(label=f"⚠️ 실패: {e}", state="error")
-    _m = SS.results.get("web_meta")
-    if _m and wmode.startswith("📚") and not web_clicked and _m.get("trend") != tsel:      # 디자인 트렌드만 바꾼 경우: 재조사 없이 다시 그리기
-        try:
-            if _m.get("topic"):
-                SS.results["html"] = product_builder.render(_m["topic"], _m["content"]["products"], _m["sources"], tsel)
-            else:
-                SS.results["html"] = web_builder.render(_m["content"], _m["theme"], _m["sources"], tsel)
-            _m["trend"] = tsel
-        except Exception as e:
-            st.warning(f"디자인 변경 실패: {e}")
-    if SS.results.get("web_meta") and wmode.startswith("📚"):
-        meta = SS.results["web_meta"]
-        with st.expander(f"🔍 사용한 자료 출처 {len(meta['sources'])}건 · 근거 부족으로 제외된 항목 {meta['removed']}개"):
-            for s in meta["sources"]:
-                st.markdown(f"- [{s['title']}]({s['url']})")
-            st.text_area("모델에 제공된 자료 원문", meta["context"], height=200, key="web_ctx_view")
-    if web_clicked and wmode.startswith("🎨"):
-        import re
-        SS.results["web_meta"] = None
+    _tp = SS.results.get("web_tpl")
+    if _tp and wkind in ptpl.TEMPLATES and not web_clicked and _tp.get("trend") != tsel:   # 트렌드만 바꾼 경우: 재조사 없이 다시 그리기
+        _tp["page"]["hero"] = form.get("hero", _tp["page"].get("hero"))
+        SS.results["html"] = ptpl.render(_tp["page"], tsel)
+        _tp["trend"] = tsel
+    if _tp and wkind in ptpl.TEMPLATES and _tp.get("meta"):
+        _mt = _tp["meta"]
+        with st.expander(f"🔍 사용한 자료 출처 {len(_mt.get('sources') or [])}건 · 근거 부족으로 뺀 항목 {_mt.get('removed', 0)}개"):
+            for s in _mt.get("sources") or []:
+                st.markdown(f"- [{s['title']}]({s.get('url', '')})" if s.get("url") else f"- {s['title']}")
+            if _mt.get("context"):
+                st.text_area("모델에 제공된 자료 일부", _mt["context"], height=180, key="web_ctx_view")
+    if web_clicked and wkind == "free":
+        SS.results["web_tpl"] = None
         ph = st.empty()
         _hint = "" if tsel == "auto" else f" 디자인은 '{dt.TRENDS[tsel]['name']}' 트렌드({dt.TRENDS[tsel]['desc']})를 충실히 따른다."
         out = llm_client.chat([
@@ -768,16 +832,14 @@ if PAGE == "web":
             {"role": "user", "content": wdesc}], {"temperature": 0.4, "num_ctx": 8192},
             stream_callback=lambda t: ph.code(t[-1500:], language="html"))
         ph.empty()
-        m = re.search(r"```html\s*(.*?)```", out, re.S) or re.search(r"(<!DOCTYPE.*</html>)", out, re.S | re.I)
+        m = _wre.search(r"```html\s*(.*?)```", out, _wre.S) or _wre.search(r"(<!DOCTYPE.*</html>)", out, _wre.S | _wre.I)
         import icon_library
         SS.results["html"] = icon_library.inline_icons(m.group(1).strip() if m else out)
     if SS.results.get("html"):
-        import re as _re2
-        _t = _re2.search(r"<title>(.*?)</title>", SS.results["html"], _re2.S)
-        remember("web", (_t.group(1).strip() if _t else "") or (SS.get("web_desc") or "웹페이지")[:60],
-                 None, {"page.html": SS.results["html"].encode("utf-8")})
-        show_html(SS.results["html"], height=650, scrolling=True)
-        st.download_button("⬇ HTML 파일 다운로드", SS.results["html"].encode("utf-8"), "page.html", "text/html", key="html_dl")
+        _t = _wre.search(r"<title>(.*?)</title>", SS.results["html"], _wre.S)
+        remember("web", (_t.group(1).strip() if _t else "") or "웹페이지", None, {"page.html": SS.results["html"].encode("utf-8")})
+        show_html(SS.results["html"], height=700, scrolling=True)
+        st.download_button("⬇ HTML 파일 다운로드 (인터넷 없이 열림, 글꼴만 온라인)", SS.results["html"].encode("utf-8"), "page.html", "text/html", key="html_dl")
         with st.expander("HTML 코드 보기"):
             st.code(SS.results["html"], language="html")
 
@@ -1256,7 +1318,7 @@ if PAGE == "chat":
                                      "아래 단추를 누르면 요청 내용을 그대로 옮겨 드립니다.")
                         arts.append({"type": "goto_image", "prompt": msg})
                     elif act == "web":
-                        parts.append("웹페이지는 자료 조사와 사실 확인을 거쳐 3~5분 걸려 '웹페이지' 메뉴에서 만듭니다. "
+                        parts.append("웹페이지는 자료 조사와 사실 확인을 거쳐 3～5분 걸려 '웹페이지' 메뉴에서 만듭니다. "
                                      "왼쪽 메뉴의 '웹페이지'에 같은 요청을 적어 주세요.")
                 except Exception as e:
                     parts.append(f"⚠️ {assistant.LABEL.get(act, act)} 중 오류: {e}")
@@ -1379,7 +1441,7 @@ if PAGE == "mindmap":
                 names = ", ".join(f.name for f in mups)
                 SS["mm_ref"] = ""
                 ctx = mm_context((mfocus.strip() + " " + mm.skeleton(doc, 300)).strip())
-                with st.spinner("AI가 문서 구조를 마인드맵으로 정리하는 중… (1~2분)"):
+                with st.spinner("AI가 문서 구조를 마인드맵으로 정리하는 중… (1～2분)"):
                     try:
                         tree = mm.from_document(doc, llm_client.chat, mfocus.strip(), names, ctx)
                         outline = mm.to_outline(tree)
@@ -1476,7 +1538,7 @@ if PAGE == "mindmap":
             mtheme = st.selectbox("디자인 테마", list(sthemes.THEMES), format_func=lambda k: sthemes.THEMES[k]["label"],
                                   key="mm_theme")
             overview = st.checkbox("'전체 구조' 장에 마인드맵 넣기", value=True, key="mm_over")
-        enrich_on = st.checkbox("AI로 설명 문장 보강 (1~2분 더 걸림)", value=bool(SS["mm_doc"]), key="mm_enrich",
+        enrich_on = st.checkbox("AI로 설명 문장 보강 (1～2분 더 걸림)", value=bool(SS["mm_doc"]), key="mm_enrich",
                                 help="가지마다 핵심 메시지와 항목 설명을 씁니다. 문서로 만든 마인드맵이면 그 문서를 근거로 씁니다. "
                                      "끄면 마인드맵 글자만 그대로 씁니다(가지별 작은 마인드맵 장).")
     if st.button("만들기", type="primary", key="mm_make", icon=":material/rocket_launch:"):
@@ -1621,7 +1683,7 @@ if PAGE == "image":
     with st.expander("고급: 영문 프롬프트 직접 입력"):
         direct = st.toggle("AI 확장 없이 아래 영문 프롬프트를 그대로 사용", key="img_direct")
         dprompt = st.text_area("영문 프롬프트", height=90, key="img_prompt_en")
-    st.caption("이미지를 그리는 동안에는 메모리 확보를 위해 AI 언어 모델을 잠시 내립니다. 첫 장은 1~2분, 같은 설정으로 이어서 그리면 더 빠릅니다.")
+    st.caption("이미지를 그리는 동안에는 메모리 확보를 위해 AI 언어 모델을 잠시 내립니다. 첫 장은 1～2분, 같은 설정으로 이어서 그리면 더 빠릅니다.")
     if st.button("이미지 만들기", type="primary", key="img_go", icon=":material/brush:") and (ireq.strip() or dprompt.strip()):
         with st.status("준비 중...", expanded=True) as stt:
             try:
@@ -1649,7 +1711,7 @@ if PAGE == "image":
                     w, h = (args.get("width") or 1024, args.get("height") or 1024)
                 if isize != "auto":
                     w, h = map(int, isize.split("x"))
-                stt.update(label="🎨 언어 모델을 내리고 이미지를 그리는 중... (처음엔 1~2분)")
+                stt.update(label="🎨 언어 모델을 내리고 이미지를 그리는 중... (처음엔 1～2분)")
                 res = icb.generate(args.get("prompt_en", ireq), args.get("negative", ""), w, h, 0,
                                    int(iseed), imodel, extra_meta={"request_ko": ireq, "llm": llm_client.MODEL,
                                                                    "llm_expand_sec": round(secs, 2), "tool_called_by_llm": called},
