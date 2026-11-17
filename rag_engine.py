@@ -106,6 +106,8 @@ def _pdf_pages_raw(data: bytes):
     """표는 '| a | b |' 행으로 따로 뽑아 칸 정렬을 지킴
     (그냥 글자만 뽑으면 일정표의 ● 가 몇 월 칸인지 알 수 없게 섞임)."""
     import fitz
+    fitz.TOOLS.mupdf_display_errors(False)
+    fitz.TOOLS.mupdf_display_warnings(False)
     doc = fitz.open(stream=data, filetype="pdf")
     wm = re.compile(r"Downloaded from .{0,60} by |This document is licensed", re.I)   # 다운로드 워터마크 제거
     out = []

@@ -5,6 +5,8 @@ import json
 import re
 
 import fitz
+fitz.TOOLS.mupdf_display_errors(False)     # 글꼴 정보가 불완전한 PDF의 경고가 터미널을 가득 채우지 않게 (본문 추출에는 영향 없음)
+fitz.TOOLS.mupdf_display_warnings(False)
 
 CAP = re.compile(r"^\s*[<\[(]?\s*(Figure|FIGURE|Fig\.|Table|TABLE|그림|표)\s*([A-Z]?\d+(?:[.\-]\d+)?)\s*[>\])]?"
                  r"\s*([-–—:.]\s*|\s+)(.{2,})$")

@@ -394,9 +394,14 @@ if PAGE == "doc":
             except Exception as e:
                 st.error(f"{f.name} 읽기 실패: {e}")
         instr = txt.strip() if ups else ""            # 문서가 있으면 입력칸은 '요청사항'
+        import form_fill as ff
+        form = ff.find_form([(f.name, f.getvalue()) for f in ups or []], instr) if len(ups or []) >= 2 else None
+        if form:                                      # 채울 서식은 원문이 아님 → 요약 대상에서 뺌
+            texts = [(n, t) for n, t in texts if n != form[0]]
         source = "\n\n".join(f"===== {n} =====\n{t}" for n, t in texts) if texts else txt
         task = detect_task(txt.strip()) if task_sel == TASKS[0] else task_sel
         SS.results["sum_images"] = None
+        SS.results["form_out"] = None
         SS.results["sum_src"] = source if texts else ""
         SS.results["sum_order"] = ("hwpx", "docx", "pdf", "md") if "hwpx" in instr.lower() or "한글" in instr else ("md", "pdf", "docx", "hwpx")
         st.caption(f"🧭 판단된 작업: **{task}**" + (f" · 요청: {instr[:80]}" if instr else ""))
@@ -428,8 +433,37 @@ if PAGE == "doc":
                 md, images = fx.to_markdown(all_items, ", ".join(names), vision=use_vision)
                 SS.results["sum"] = exporters.to_gaejosik(md)
                 SS.results["sum_images"] = images
+        elif form and texts:
+            st.info(f"📝 '{form[0]}' 을(를) 채울 서식으로 인식했습니다. 보고서 {len(texts)}건마다 따로 검토해 서식 칸을 채웁니다.")
+            bar = st.progress(0.0)
+            with st.status("📝 서식 작성 중", expanded=True) as stt:
+                def prog(f, m):
+                    bar.progress(min(f, 1.0))
+                    stt.update(label=m)
+                res = ff.run(form[0], form[1], texts, llm_client.chat, instr, prog)
+                stt.update(label=f"✅ 서식 작성 완료 — 보고서 {len(res['matched'])}건", state="complete")
+            if res["unmatched"]:
+                st.warning("서식의 다음 칸에 맞는 원문 파일을 찾지 못해 비워 두었습니다: " + " / ".join(res["unmatched"]))
+            for k, v in res["numcheck"].items():
+                if v and v["missing"]:
+                    st.warning(f"{k[:40]} — 원문에서 확인 안 된 수치: " + ", ".join(x["num"] for x in v["missing"][:6]))
+            SS.results["sum"] = res["markdown"]
+            SS.results["sum_order"] = ("hwpx", "docx", "pdf", "md")
+            SS.results["form_out"] = (form[0].rsplit(".", 1)[0].strip() + "_작성.hwpx", res["hwpx"])
         elif not source.strip() and not (SS.get("use_rag") or SS.get("use_web")):
             st.warning("문서/텍스트를 입력하거나 RAG·웹 검색을 켜 주세요.")
+        elif len(texts) >= 2 and ff.wants_each(instr):   # '각각' 요청 → 문서를 합치지 않고 문서마다 따로 처리
+            parts = []
+            bar = st.progress(0.0)
+            with st.status("🔄 문서별 처리 중", expanded=True) as stt:
+                for i, (n, t) in enumerate(texts):
+                    def prog(f, m, i=i):
+                        bar.progress(min((i + f) / len(texts), 1.0))
+                        stt.update(label=f"[{i + 1}/{len(texts)}] {n[:30]} — {m}")
+                    r = mrs.summarize(t, SS.get("preset", sp.DEFAULT_PRESET), progress=prog, extra_instruction=instr, doc_name=n)
+                    parts.append(f"# {n.rsplit('.', 1)[0]}\n\n" + _re.sub(r"^#\s+[^\n]*\n", "", r["result"].strip(), count=1))
+                stt.update(label=f"✅ 문서 {len(texts)}건 처리 완료", state="complete")
+            SS.results["sum"] = "\n\n".join(parts)
         else:
             doc_name = ", ".join(n for n, _ in texts)
             if len(source) > mrs.CHUNK_LIMIT:
@@ -452,7 +486,13 @@ if PAGE == "doc":
     if SS.results.get("sum"):
         _imgs = SS.results.get("sum_images") or {}
         remember("doc", (SS.get("sum_txt") or "").strip()[:60] or ", ".join(f.name for f in (ups or [])) or "문서 요약",
-                 SS.results["sum"], {f"img_{k}.png": v for k, v in _imgs.items()}, {"images": list(_imgs)})
+                 SS.results["sum"], {**{f"img_{k}.png": v for k, v in _imgs.items()},
+                                     **({SS.results["form_out"][0]: SS.results["form_out"][1]} if SS.results.get("form_out") else {})},
+                 {"images": list(_imgs)})
+        if SS.results.get("form_out"):
+            _fn, _fd = SS.results["form_out"]
+            st.download_button(f"⬇ 작성된 서식 내려받기 ({_fn})", _fd, _fn, "application/octet-stream",
+                               key="form_dl", type="primary", icon=":material/download:")
         show_doc(SS.results["sum"], SS.results.get("sum_images"))
         show_numcheck(SS.results["sum"], SS.results.get("sum_src", ""), "sum")
         download_row(SS.results["sum"], "sum", order=SS.results.get("sum_order", ("md", "pdf", "docx", "hwpx")),
