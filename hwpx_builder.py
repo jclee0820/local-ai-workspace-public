@@ -3,6 +3,7 @@
 제목, 개조식(□ ㅇ - ※), 표, 그림(BinData)을 지원한다."""
 import copy
 import io
+import threading
 import os
 import struct
 import zipfile
@@ -23,12 +24,14 @@ NS = ('xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" '
       'xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head"')
 SYM = {"box": "□ ", "circle": "ㅇ ", "dash": "- ", "note": "※ "}
 
-_pid = [100]
+_pid = [100]                         # template_injector 가 양식의 기존 번호와 겹치지 않게 시작값을 직접 맞춤(_pid[0] = 900000)
+_pid_lock = threading.Lock()         # 여러 사용자가 동시에 문서를 만들어도 번호가 겹치지 않게
 
 
 def _nid():
-    _pid[0] += 1
-    return _pid[0]
+    with _pid_lock:
+        _pid[0] += 1
+        return _pid[0]
 
 
 # ------------------------------------------------------------------ XML 조각 (템플릿 주입기와 공용)

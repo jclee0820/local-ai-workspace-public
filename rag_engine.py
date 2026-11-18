@@ -448,8 +448,10 @@ def page_chunks(pages, size: int = 800):
     return out
 
 
-_STAMP = 0          # 지식보관함이 바뀔 때마다 증가 → 글자 검색 색인을 다시 만듦
+_STAMP = 0          # 지식보관함이 바뀔 때마다 증가 → 글자 검색 색인을 다시 맞춤
 _LEX = {}
+import threading as _threading
+_LEX_LOCK = _threading.Lock()
 
 
 def _touch():
@@ -469,7 +471,8 @@ def add_document(filename: str, data: bytes, source: str = None) -> int:
         part = chunks[a:a + 400]
         col.add(ids=[hashlib.md5(f"{source}-{a + i}".encode()).hexdigest() for i in range(len(part))],
                 documents=[t for _, t in part],
-                metadatas=[{"source": source, "idx": a + i, "page": pg} for i, (pg, _) in enumerate(part)])
+                metadatas=[{"source": source, "idx": a + i, "page": pg, "h": hashlib.md5(t.encode("utf-8")).hexdigest()[:10]}
+                           for i, (pg, t) in enumerate(part)])
     _touch()
     return len(chunks)
 
@@ -518,24 +521,103 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", "", s.lower())
 
 
+def _lex_file():
+    return os.path.join(DB_DIR, "lex_index.joblib")
+
+
+def _lex_load():
+    try:
+        import joblib
+        d = joblib.load(_lex_file())
+        return d if isinstance(d, dict) and d.get("vec") is not None and d.get("mat") is not None else None
+    except Exception:
+        return None
+
+
+def _lex_save(d):
+    """색인을 디스크에 저장(앱을 다시 켜도 처음부터 다시 계산하지 않게). 검색을 막지 않도록 별도 스레드에서."""
+    import threading
+
+    def run(snap):
+        try:
+            import joblib
+            tmp = _lex_file() + ".tmp"
+            joblib.dump(snap, tmp)
+            os.replace(tmp, _lex_file())
+        except Exception:
+            pass
+    snap = {k: d[k] for k in ("keys", "ids", "docs", "metas", "vec", "mat", "fit_n", "drift")}
+    threading.Thread(target=run, args=(snap,), daemon=True).start()
+
+
+def _fit(docs):
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    import warnings
+    vec = TfidfVectorizer(analyzer="char", ngram_range=(2, 3), sublinear_tf=True, preprocessor=_norm,
+                          max_features=400000, dtype="float32")
+    with warnings.catch_warnings():                                # float32 사용 경고(메모리 절약을 위해 일부러 씀) 숨김
+        warnings.simplefilter("ignore", UserWarning)
+        mat = vec.fit_transform(docs)
+    return vec, mat
+
+
 def _lex(col):
-    """글자 n-그램 TF-IDF 색인. 임베딩이 놓치는 고유명사·문서번호·수치(예: J3295, 5.9GHz, 제12조)를 정확히 잡음."""
-    n = col.count()
-    if _LEX.get("stamp") == _STAMP and _LEX.get("n") == n:
+    """글자 n-그램 TF-IDF 색인. 임베딩이 놓치는 고유명사·문서번호·수치(예: J3295, 5.9GHz, 제12조)를 정확히 잡음.
+    - 바뀐 조각만 반영: 조각마다 (id, 내용 해시)를 비교해 추가·삭제분만 행렬에 더하고 뺀다(전체 재계산은 변경이 30%를 넘을 때만).
+    - 디스크 저장: 앱을 다시 켜도 저장된 색인을 불러와 바뀐 부분만 반영한다.
+      (조각 1만 개 기준 전체 재계산 약 25초 → 증분·불러오기는 수 초 이내)"""
+    with _LEX_LOCK:
+        n = col.count()
+        if _LEX.get("stamp") == _STAMP and _LEX.get("n") == n and (_LEX.get("mat") is not None or not 0 < n <= LEX_LIMIT):
+            return _LEX
+        if not 0 < n <= LEX_LIMIT:
+            _LEX.clear()
+            _LEX.update(stamp=_STAMP, n=n, mat=None)
+            return _LEX
+        meta = col.get(include=["metadatas"])
+        cur_keys = [f"{i}:{(m or {}).get('h', '')}" for i, m in zip(meta["ids"], meta["metadatas"])]
+        base = _LEX if _LEX.get("mat") is not None and _LEX.get("keys") else _lex_load()
+        changed = True
+        if base:
+            pos = {k: r for r, k in enumerate(base["keys"])}
+            cur_set = set(cur_keys)
+            keep = [r for r, k in enumerate(base["keys"]) if k in cur_set]
+            add_ix = [j for j, k in enumerate(cur_keys) if k not in pos]
+            diff = (len(base["keys"]) - len(keep)) + len(add_ix)
+            if diff == 0:
+                d, changed = dict(base), base is not _LEX and False
+            elif diff <= max(200, 0.3 * base.get("fit_n", len(base["keys"]))) and base.get("drift", 0) + diff <= 0.5 * base.get("fit_n", 1):
+                from scipy.sparse import vstack
+                d = {"vec": base["vec"], "fit_n": base.get("fit_n", len(base["keys"])), "drift": base.get("drift", 0) + diff,
+                     "keys": [base["keys"][r] for r in keep], "ids": [base["ids"][r] for r in keep],
+                     "docs": [base["docs"][r] for r in keep], "metas": [base["metas"][r] for r in keep], "mat": base["mat"][keep]}
+                if add_ix:
+                    add_ids = [meta["ids"][j] for j in add_ix]
+                    got = {"ids": [], "documents": [], "metadatas": []}
+                    for a in range(0, len(add_ids), 5000):
+                        g = col.get(ids=add_ids[a:a + 5000], include=["documents", "metadatas"])
+                        for kk in got:
+                            got[kk] += g[kk]
+                    import warnings
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", UserWarning)
+                        d["mat"] = vstack([d["mat"], d["vec"].transform(got["documents"])]).tocsr()
+                    d["keys"] += [f"{i}:{(m or {}).get('h', '')}" for i, m in zip(got["ids"], got["metadatas"])]
+                    d["ids"] += got["ids"]
+                    d["docs"] += got["documents"]
+                    d["metas"] += got["metadatas"]
+            else:
+                base = None
+        if not base:
+            got = col.get(include=["documents", "metadatas"])
+            vec, mat = _fit(got["documents"])
+            d = {"vec": vec, "mat": mat, "fit_n": len(got["ids"]), "drift": 0, "ids": got["ids"], "docs": got["documents"],
+                 "metas": got["metadatas"], "keys": [f"{i}:{(m or {}).get('h', '')}" for i, m in zip(got["ids"], got["metadatas"])]}
+        if changed or not os.path.exists(_lex_file()):
+            _lex_save(d)
+        _LEX.clear()
+        _LEX.update(d, stamp=_STAMP, n=n)
         return _LEX
-    _LEX.clear()
-    _LEX.update(stamp=_STAMP, n=n, mat=None)
-    if 0 < n <= LEX_LIMIT:
-        from sklearn.feature_extraction.text import TfidfVectorizer
-        got = col.get(include=["documents", "metadatas"])
-        vec = TfidfVectorizer(analyzer="char", ngram_range=(2, 3), sublinear_tf=True, preprocessor=_norm,
-                              max_features=400000, dtype="float32")
-        import warnings
-        with warnings.catch_warnings():                            # float32 사용 경고(메모리 절약을 위해 일부러 씀) 숨김
-            warnings.simplefilter("ignore", UserWarning)
-            mat = vec.fit_transform(got["documents"])
-        _LEX.update(ids=got["ids"], docs=got["documents"], metas=got["metadatas"], vec=vec, mat=mat)
-    return _LEX
 
 
 def search_hits(query: str, k: int = 6, max_chars: int = 3500, pool: int = 30):

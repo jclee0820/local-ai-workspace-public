@@ -86,8 +86,17 @@ def items(kind: str = None, query: str = "", limit: int = 200):
     return out
 
 
+def _inside(item_id: str, name: str = "") -> str:
+    """보관함 폴더 밖('..' 등)을 가리키는 경로는 거부."""
+    base = os.path.abspath(ROOT)
+    p = os.path.abspath(os.path.join(base, os.path.basename(str(item_id)), os.path.basename(str(name)) if name else ""))
+    if not (p == base or p.startswith(base + os.sep)):
+        raise ValueError("허용되지 않는 보관함 경로입니다.")
+    return p
+
+
 def load_text(item_id: str) -> str:
-    p = os.path.join(ROOT, item_id, "text.md")
+    p = os.path.join(_inside(item_id), "text.md")
     if not os.path.exists(p):
         return ""
     with open(p, encoding="utf-8") as f:
@@ -95,7 +104,7 @@ def load_text(item_id: str) -> str:
 
 
 def file_path(item_id: str, name: str) -> str:
-    return os.path.join(ROOT, item_id, name)
+    return _inside(item_id, name)
 
 
 def read_file(item_id: str, name: str) -> bytes:

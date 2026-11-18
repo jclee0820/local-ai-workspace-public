@@ -670,10 +670,10 @@ def to_web(tree, info=None, source_name=""):
              "accent": "#1F9BCF", "accent2": "#6FD3F7", "heading_font": "IBM Plex Sans KR", "body_font": "Noto Sans KR",
              "hero": "grid", "mood": ["MIND MAP"]}
     page = web_builder.render(content, theme, [])
-    mm = to_svg(layout(tree))
+    mm_svg = to_svg(layout(tree)).replace("<svg ", '<svg style="width:100%;height:auto" ', 1)   # f-string 밖에서 처리(Python 3.10·3.11 호환)
     block = (f'<section id="mindmap" class="sec"><header class="sec-head"><span class="sec-no">MAP</span><h2>한눈에 보기</h2></header>'
              f'<div style="background:#F7F9FA;border-radius:16px;padding:12px;overflow-x:auto">'
-             f'<div style="min-width:640px">{mm.replace("<svg ", "<svg style=\"width:100%;height:auto\" ", 1)}</div></div></section>')
+             f'<div style="min-width:640px">{mm_svg}</div></div></section>')
     page = page.replace("<main>", "<main>" + block, 1)
     page = re.sub(r"<footer>.*?</footer>", f"<footer><p>마인드맵{(' · 원문: ' + html.escape(source_name)) if source_name else ''}"
                   f" · 로컬 AI 작업실에서 만들었습니다.</p></footer>", page, flags=re.S)

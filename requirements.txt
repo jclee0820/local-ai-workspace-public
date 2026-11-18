@@ -104,7 +104,7 @@ python-dotenv==1.2.4
 python-multipart==0.0.33
 python-pptx==1.0.2
 pytz==2026.6
-pywin32==312
+pywin32==312; sys_platform == "win32"
 PyYAML==6.0.3
 referencing==0.37.0
 regex==2026.11.9
@@ -148,3 +148,4 @@ websockets==17.4
 xlsxwriter==3.3.1
 yarl==1.25.1
 openpyxl==3.1.5
+segno==1.6.6

@@ -149,7 +149,7 @@ body{{margin:0;font-family:'Malgun Gothic',sans-serif}} #bar{{padding:6px}} butt
 <div id="out"></div>
 <script>
 const CODE = {code_js};
-mermaid.initialize({{startOnLoad:false, theme:'neutral', flowchart:{{curve:'linear'}}, securityLevel:'loose',
+mermaid.initialize({{startOnLoad:false, theme:'neutral', flowchart:{{curve:'linear'}}, securityLevel:'strict',
   themeVariables:{{fontFamily:'Malgun Gothic, sans-serif'}}}});
 mermaid.render('g1', CODE).then(r=>{{ document.getElementById('out').innerHTML=r.svg; }})
  .catch(e=>{{ document.getElementById('msg').innerText='Mermaid 문법 오류: '+e.message; }});

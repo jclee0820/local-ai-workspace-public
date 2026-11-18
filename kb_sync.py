@@ -62,11 +62,25 @@ def suggest_folders():
     return out
 
 
+def allowed_roots():
+    """서버 모드(LAI_PASSWORD 설정)에서 연결을 허용할 폴더 목록. 개인 PC 모드면 None(제한 없음).
+    서버 모드인데 LAI_ALLOWED_SYNC_ROOTS 가 없으면 빈 목록 → 폴더 연결 불가."""
+    if not os.environ.get("LAI_PASSWORD"):
+        return None
+    raw = os.environ.get("LAI_ALLOWED_SYNC_ROOTS", "")
+    return [os.path.normcase(os.path.realpath(p.strip())) for p in raw.split(os.pathsep) if p.strip()]
+
+
 def add_folder(path: str) -> str:
     """오류 문구를 돌려줌 (성공이면 빈 문자열)."""
     path = os.path.normpath(os.path.expanduser(path.strip().strip('"')))
     if not os.path.isdir(path):
         return "폴더를 찾을 수 없습니다. 탐색기 주소창의 경로를 그대로 붙여 넣어 주세요."
+    roots = allowed_roots()
+    if roots is not None:                                   # 서버 모드: 관리자가 허용한 폴더 아래만 연결 가능
+        real = os.path.normcase(os.path.realpath(path))
+        if not any(real == r or real.startswith(r.rstrip("\\/") + os.sep) for r in roots):
+            return "서버 모드에서는 관리자가 허용한 폴더 아래만 연결할 수 있습니다: " + ", ".join(roots)
     s = load_state()
     if any(os.path.normcase(path) == os.path.normcase(f) for f in s["folders"]):
         return "이미 연결된 폴더입니다."

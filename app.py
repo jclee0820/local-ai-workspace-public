@@ -16,7 +16,7 @@ import template_injector as ti
 import web_search
 from md_parser import parse_slides
 
-st.set_page_config(page_title="로컬 AI 작업실", page_icon="✳️", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="로컬 AI 작업실", page_icon="✳️", layout="wide", initial_sidebar_state="auto")   # auto: PC는 펼침, 휴대폰은 접힘
 fragment = getattr(st, "fragment", None)
 
 SS = st.session_state
@@ -24,17 +24,47 @@ SS.setdefault("results", {})
 SS.setdefault("sources", {})
 
 # 서버 모드 접속 비밀번호 (환경변수 LAI_PASSWORD 가 설정된 경우에만, 설치 프로그램이 서비스에 설정)
+import access
 _PW = os.environ.get("LAI_PASSWORD", "")
+_CLIENT_IP = getattr(getattr(st, "context", None), "ip_address", None)
+IS_REMOTE = not access.is_local(_CLIENT_IP)
 if _PW and not SS.get("_authed"):
     import hmac
     st.markdown("## ✳ 로컬 AI 작업실")
+    _wait = access.wait_seconds(_CLIENT_IP or "local")
+    if _wait:                                                 # 접속 주소별로 10분 안에 5번 틀리면 1분 차단
+        st.error(f"비밀번호를 여러 번 틀렸습니다. {_wait}초 뒤에 다시 시도하세요.")
+        st.stop()
     _pw_in = st.text_input("접속 비밀번호", type="password", key="_pw_in")
     if _pw_in:
         if hmac.compare_digest(_pw_in.encode("utf-8"), _PW.encode("utf-8")):
             SS["_authed"] = True
             st.rerun()
         else:
+            access.note_fail(_CLIENT_IP or "local")
             time.sleep(1.5)                                   # 무차별 대입 지연
+            st.error("비밀번호가 맞지 않습니다.")
+    st.stop()
+
+# 휴대폰·원격 접속: 이 PC(localhost)는 그대로, 다른 기기는 이 PC에서 정한 비밀번호로 로그인해야 함
+if not _PW and IS_REMOTE and SS.get("_authed_ver") != access.set_at():
+    st.markdown("## ✳ 로컬 AI 작업실")
+    if not access.has_password():
+        st.warning("휴대폰·원격 접속이 아직 꺼져 있습니다. 작업실이 켜진 PC에서 왼쪽 사이드바의 "
+                   "'휴대폰·원격 접속'을 열어 비밀번호를 먼저 정해 주세요.")
+        st.stop()
+    _wait = access.wait_seconds(_CLIENT_IP)
+    if _wait:
+        st.error(f"비밀번호를 여러 번 틀렸습니다. {_wait}초 뒤에 다시 시도하세요.")
+        st.stop()
+    with st.form("remote_login"):
+        _rp = st.text_input("접속 비밀번호", type="password")
+        _go = st.form_submit_button("들어가기", type="primary")
+    if _go:
+        if access.check(_rp, _CLIENT_IP):
+            SS["_authed_ver"] = access.set_at()          # 비밀번호를 바꾸거나 끄면 다시 로그인해야 함
+            st.rerun()
+        else:
             st.error("비밀번호가 맞지 않습니다.")
     st.stop()
 
@@ -253,6 +283,10 @@ with st.sidebar:
                     "qwen3:14b": "Qwen3 14B · 가벼움 (약 10GB)",
                     "qwen2.5:14b": "Qwen2.5 14B · 가벼움 (약 10GB)"}
     with st.expander(":material/neurology: AI 모델", expanded=False):
+      if _PW:                                                   # 서버 모드: 한 사람이 모델을 바꾸면 다른 사람의 작업이 끊기므로 화면에서는 못 바꿈
+        st.caption(f"현재 모델: {MODEL_LABELS.get(llm_client.MODEL, llm_client.MODEL)}")
+        st.caption("서버 모드에서는 여러 사람이 함께 쓰므로 모델을 화면에서 바꿀 수 없습니다. 관리자가 app/model.json 을 고쳐 바꿉니다.")
+      else:
         installed = [m for m in llm_client.list_models() if not m.startswith("all-minilm")] or [llm_client.MODEL]
         if llm_client.MODEL not in installed:
             installed.insert(0, llm_client.MODEL)
@@ -304,7 +338,12 @@ with st.sidebar:
             if fc2.button("✕", key=f"kb_rm_{fi}", help="연결 끊기 (원본 파일은 그대로, 지식보관함에서만 빠짐)"):
                 kb_sync.remove_folder(fpath)
                 st.rerun()
+        _roots = kb_sync.allowed_roots()
+        if _roots == []:
+            st.caption("서버 모드에서는 관리자가 허용한 폴더(환경변수 LAI_ALLOWED_SYNC_ROOTS)만 연결할 수 있습니다. 지금은 허용된 폴더가 없습니다.")
         sug = [("직접 입력", "")] + [(f"{lab} — {pth}", pth) for lab, pth in kb_sync.suggest_folders() if pth not in kst["folders"]]
+        if _roots is not None:
+            sug = [("직접 입력", "")] + [(f"허용 폴더 — {r}", r) for r in _roots if r not in kst["folders"]]
         pick = st.selectbox("추가할 폴더", sug, format_func=lambda x: x[0], key="kb_pick")
         typed = st.text_input("폴더 경로", key="kb_path", placeholder=r"예) D:\업무자료  (탐색기 주소창에서 복사)",
                               label_visibility="collapsed") if not pick[1] else ""
@@ -357,6 +396,44 @@ with st.sidebar:
             st.caption(ti.hwpx_status(p))
         st.caption("양식 안에 {{제목}} {{일자}} {{본문}} 을 적어두면 해당 위치에 채워집니다. "
                    "슬라이드 템플릿은 '발표 슬라이드' 메뉴에서 올립니다.")
+
+    if not IS_REMOTE and not _PW:                             # 설정은 이 PC에서만 (휴대폰에서는 안 보임)
+        with st.expander(":material/smartphone: 휴대폰·원격 접속"):
+            if access.has_password():
+                st.success(f"켜짐 · 비밀번호 설정 {access.set_at()}")
+            else:
+                st.info("꺼짐 — 비밀번호를 정하면 같은 와이파이에 연결된 휴대폰에서 접속할 수 있습니다.")
+            with st.form("acc_form", clear_on_submit=True, border=False):     # 폼: 저장을 누를 때 두 칸이 함께 전달됨
+                _p1 = st.text_input("새 비밀번호 (6자 이상)" if not access.has_password() else "비밀번호 바꾸기",
+                                    type="password", key="acc_p1")
+                _p2 = st.text_input("비밀번호 확인", type="password", key="acc_p2")
+                _save = st.form_submit_button("비밀번호 저장")
+            if _save:
+                if _p1 != _p2:
+                    st.error("두 비밀번호가 다릅니다.")
+                else:
+                    try:
+                        access.set_password(_p1)
+                        st.toast("저장했습니다. 휴대폰에서 아래 QR 또는 주소로 접속하세요.")
+                        st.rerun()
+                    except ValueError as _e:
+                        st.error(str(_e))
+            if access.has_password():
+                _port = st.get_option("server.port") or 8501
+                _ts = access.tailscale_ip()
+                for _label, _ip in [("같은 와이파이에서", ip) for ip in access.lan_ips()] + ([("밖에서 (Tailscale)", _ts)] if _ts else []):
+                    _u = access.url(_ip, _port)
+                    st.markdown(f"**{_label}**")
+                    st.image(access.qr_png(_u), width=170)
+                    st.code(_u, language=None)
+                st.caption("휴대폰 카메라로 QR을 찍으면 열립니다. PC가 켜져 있고 작업실이 실행 중이어야 하며, "
+                           "절전 모드에 들어가면 끊깁니다.")
+                if not _ts:
+                    st.caption("집 밖(LTE)에서도 쓰려면 PC와 휴대폰에 Tailscale을 설치하고 같은 계정으로 로그인하세요. "
+                               "설치되면 여기에 밖에서 쓰는 주소가 함께 나옵니다.")
+                if st.button("원격 접속 끄기", key="acc_off"):
+                    access.clear_password()
+                    st.rerun()
 
     monitor_box = st.container()
 
@@ -1656,7 +1733,9 @@ if PAGE == "image":
     ref_paths = []
     for f in (ups or []):
         os.makedirs(ref_dir, exist_ok=True)
-        pth = os.path.join(ref_dir, f.name)
+        import re as _rre
+        _nm = _rre.sub(r"[^\w.\-가-힣 ]", "_", os.path.basename(f.name)).strip(" .") or "ref.png"   # 경로·특수문자 제거
+        pth = os.path.join(ref_dir, _nm)
         with open(pth, "wb") as fh:
             fh.write(f.getvalue())
         ref_paths.append(pth)
