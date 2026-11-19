@@ -99,7 +99,31 @@ def _walk_hwpx(node, out):
 
 def pdf_pages(data: bytes):
     """PDF → [(쪽 번호, 텍스트)] (변환 결과는 디스크에 보관해 재사용)."""
-    return [(int(n), t) for n, t in _disk_cache("pdf2", data, lambda: _pdf_pages_raw(data))]
+    return [(int(n), t) for n, t in _disk_cache("pdf3", data, lambda: _pdf_pages_raw(data))]
+
+
+def _cell_text(page, bbox):
+    """칸 영역의 글자를 줄 순서대로. find_tables().extract() 는 일부 한글 PDF 에서 마침표를 칸 끝으로 밀어
+    '2022.09~2023.04' 를 '202209 2 . ~ 02304 .' 로 망가뜨리므로 칸 영역을 직접 읽음.
+    줄바꿈으로 끊긴 숫자(…~2 / 023.04)는 붙이고, 나머지 줄은 띄어 씀."""
+    import pymupdf as fitz
+    lines = [l.strip() for l in page.get_text("text", clip=fitz.Rect(bbox)).splitlines() if l.strip()]
+    out = ""
+    for l in lines:
+        out += ("" if (out and out[-1].isdigit() and l[0].isdigit()) or not out else " ") + l
+    return out
+
+
+def _table_rows(page, t):
+    try:
+        rows = []
+        for r in t.rows:
+            rows.append([_cell_text(page, c) if c else "" for c in r.cells])
+        if rows and any(any(c for c in r) for r in rows):
+            return rows
+    except Exception:
+        pass
+    return t.extract()
 
 
 def _pdf_pages_raw(data: bytes):
@@ -115,7 +139,7 @@ def _pdf_pages_raw(data: bytes):
         tables, boxes = [], []
         try:
             for t in page.find_tables().tables:
-                rows = t.extract()
+                rows = _table_rows(page, t)
                 if len(rows) >= 2 and max(len(r) for r in rows) >= 2:
                     boxes.append(fitz.Rect(t.bbox))
                     tables.append((t.bbox[1], "\n".join(

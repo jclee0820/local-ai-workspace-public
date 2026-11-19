@@ -331,8 +331,207 @@ def verify_src(src: str, doc_norm: str) -> bool:
     return hit / max(len(grams), 1) >= 0.7 and _norm(n[:6]) in doc_norm
 
 
-def build(raw: dict, doc_text: str, user_start: dt.date = None):
-    """LLM 원본 → 정리된 WBS. 반환 {'project':{name,start,end}, 'tasks':[...] }"""
+EFFORT_SYS = """너는 공공 연구용역·정보화 사업의 PMO(사업관리) 전문가다. 사업 기간과 WBS 를 보고,
+날짜가 정해지지 않은 작업마다 표준 공수에 근거한 소요 기간(주)과 선행 작업을 추정해 JSON만 출력한다.
+규칙:
+- weeks: 그 작업에 실제로 필요한 기간(주, 정수 1 이상). 작업 범위·난이도와 사업 전체 길이에 비례하게 정한다.
+  (예: 1년 이하 연구용역이면 조사 4~8주·분석 6~12주·정책제언 3~6주, 다년도 기술개발이면 설계 12~26주·개발 26~52주·실증 26~52주)
+  같은 묶음 안 작업이라도 범위가 다르면 기간도 다르게 준다. 모든 작업을 사업 전체 기간으로 두지 않는다.
+- after: 이 작업을 시작하기 전에 끝나야 하는 작업의 wbs 목록. 일반적 흐름은 조사·요구분석·설계 → 개발·분석 → 통합·시험 → 실증·검증 → 최적화·표준화·정책제언.
+  병렬로 할 수 있으면 [] 로 둔다. 자기 자신이나 뒤에 나오는 작업끼리 서로 선행이 되지 않게 한다.
+- stage: 사업 전체 흐름에서 이 작업이 놓이는 시점(0.0=맨 처음, 0.5=가운데, 1.0=맨 끝). 설계·기능정의는 0~0.2, 개발 0.2~0.6,
+  통합·시험 0.5~0.7, 실증·성능검증 0.6~0.9, 최적화·표준화·매뉴얼·정책제언 0.8~1.0 처럼 작업 성격에 맞게 정한다.
+- 목록에 있는 작업만, wbs 코드를 그대로 쓴다.
+출력 형식: {"tasks":[{"wbs":"1.1","weeks":6,"after":[],"stage":0.0},{"wbs":"1.2","weeks":8,"after":["1.1"],"stage":0.3}]}"""
+
+
+def _report_point(name, p_start, p_end):
+    """날짜 없는 보고 마일스톤의 관례적 시점."""
+    if re.search(r"착수|킥오프|kick", name, re.I):
+        return p_start
+    if re.search(r"중간", name):
+        return p_start + (p_end - p_start) / 2
+    if re.search(r"최종|완료|납품|검수|결과\s*보고", name):
+        return p_end
+    return None
+
+
+def schedule_undated(by_code, codes, p_start, p_end, chat_fn=None, request="", progress=None):
+    """날짜 없는 말단 작업에 기간을 붙임(제자리 수정).
+    창(window) = 날짜가 문서에 있는 가장 가까운 상위 작업의 기간, 없으면 사업 기간.
+    LLM 이 작업별 소요 주·선행 작업·단계(stage 0~1)를 추정 → 선행이 끝난 뒤, 단계 위치(창 안의 비율) 이후에 시작.
+    병렬 작업을 창 전체로 늘리지 않음(늘리면 모든 막대가 같아짐): 가장 긴 흐름이 창보다 길면 줄이고, 짧으면 최대 1.5배까지만 늘림.
+    LLM 이 없거나 실패하면 같은 1수준 묶음은 순서대로, 1수준 묶음끼리는 차례로(앞 묶음 끝나면 다음) 배치해 창을 채움."""
+    kids = {c: [k for k in codes if k.startswith(c + ".")] for c in codes}
+    for c in codes:                                          # 날짜 없는 보고 마일스톤: 착수=시작, 중간=가운데, 최종=끝
+        t = by_code[c]
+        if t.get("ms") and not t["s"]:
+            d = _report_point(t["name"], p_start, p_end)
+            if d:
+                t["s"] = t["e"] = d
+                t["basis"] = "추정(보고 시점)"
+    leaves = [c for c in codes if not kids[c] and not by_code[c]["s"] and not by_code[c].get("ms")]
+    if not leaves:
+        return
+
+    # 최종보고(결과보고·납품) 시점이 사업 기간 안에 있으면 실제 작업은 그때까지 끝나야 함
+    finals = [by_code[c]["s"] for c in codes if by_code[c].get("ms") and by_code[c]["s"]
+              and re.search(r"최종|결과\s*보고|납품|완료\s*보고", by_code[c]["name"])]
+    w_end = max(finals) if finals and p_start + dt.timedelta(days=28) < max(finals) < p_end else p_end
+
+    def window(c):
+        while "." in c:
+            c = c.rsplit(".", 1)[0]
+            p = by_code.get(c)
+            if p and p["s"] and str(p.get("basis", "")).startswith("문서"):
+                return p["s"], p["e"]
+        return p_start, w_end
+
+    est = {}
+    if chat_fn:
+        if progress:
+            progress(0.97, f"날짜 없는 작업 {len(leaves)}개의 공수·순서 추정 중…")
+        weeks = max(1, round((p_end - p_start).days / 7))
+        lines = []
+        for c in codes:
+            t = by_code[c]
+            mark = (f"{t['s']:%Y-%m-%d}~{t['e']:%Y-%m-%d} (확정)" if t["s"] else ("← 추정 대상" if c in leaves else ""))
+            lines.append(f"{'  ' * c.count('.')}{c} {t['name']} {mark}".rstrip())
+        user = (f"[사업 기간] {p_start:%Y-%m-%d} ~ {p_end:%Y-%m-%d} (약 {weeks}주)\n"
+                + (f"[사용자 요청] {request}\n" if request else "")
+                + "[WBS]\n" + "\n".join(lines) + "\n\n'← 추정 대상' 작업만 weeks·after·stage 를 추정하라.")
+        try:
+            d = _json(chat_fn([{"role": "system", "content": EFFORT_SYS}, {"role": "user", "content": user}],
+                              {"temperature": 0.1, "num_predict": 2500}, fmt="json")) or {}
+            for x in d.get("tasks") or []:
+                c = _code(x.get("wbs"))
+                if c in leaves:
+                    try:
+                        w = max(1, min(int(float(x.get("weeks") or 0)), 260))
+                    except Exception:
+                        w = 0
+                    aft = [_code(a) for a in (x.get("after") or []) if _code(a)]
+                    try:
+                        stg = min(max(float(x.get("stage")), 0.0), 1.0)
+                    except Exception:
+                        stg = None
+                    est[c] = {"weeks": w or None, "after": aft, "stage": stg}
+        except Exception:
+            est = {}
+    ai = bool(est)
+    tops = [c for c in codes if "." not in c]
+    for c in leaves:                                          # 추정이 빠진 작업 기본값
+        e = est.setdefault(c, {"weeks": None, "after": [], "stage": None})
+        if not e["weeks"]:
+            e["weeks"] = 4
+        if not ai:                                            # 규칙 기반: 같은 묶음 안은 순서대로, 묶음끼리도 차례로
+            sib = [k for k in leaves if k.split(".")[0] == c.split(".")[0]]
+            i = sib.index(c)
+            if i:
+                e["after"] = [sib[i - 1]]
+            else:
+                ti = tops.index(c.split(".")[0]) if c.split(".")[0] in tops else 0
+                prev = [k for k in leaves if tops.index(k.split(".")[0]) < ti] if ti else []
+                e["after"] = [prev[-1]] if prev else []
+    groups = {}
+    for c in leaves:
+        groups.setdefault(window(c), []).append(c)
+    for (ws, we), mem in groups.items():
+        span_days = max(7, (we - ws).days + 1)
+        order = sorted(mem, key=_key)
+        for i, c in enumerate(order):                         # 단계가 빠진 작업: WBS 순서로 앞→뒤 고르게
+            if est[c].get("stage") is None:
+                est[c]["stage"] = 0.8 * i / max(len(order) - 1, 1)
+
+        def lay(scale, use_stage=False):
+            out = {}
+            for c in order:
+                dur = min(max(3, round(est[c]["weeks"] * 7 * scale)), span_days)
+                latest = we - dt.timedelta(days=dur - 1)              # 창 안에 끝나려면 이때까지는 시작해야 함
+                st0 = ws
+                for a in est[c]["after"]:
+                    if a == c or _key(a) >= _key(c) and a in mem:   # 순환 방지: 앞선 작업만 선행으로 인정
+                        continue
+                    if a in out:                                     # 같이 배치 중인 작업
+                        pe_ = out[a][1]
+                    elif a in by_code and by_code[a]["s"] and not kids[a]:   # 문서에 날짜가 있는 말단 작업
+                        pe_ = by_code[a]["e"]
+                    else:                                            # 묶음(상위 코드): 그 아래에서 새로 배치한 작업들의 끝만 봄
+                        ends = [out[k][1] for k in out if k.startswith(a + ".")]   # (전 기간 요약 행의 끝을 쓰면 모두 맨 끝으로 밀림)
+                        if not ends:
+                            continue
+                        pe_ = max(ends)
+                    cand = pe_ + dt.timedelta(days=1)
+                    if cand <= latest:                               # 지킬 수 없는 선행(창 끝에 몰리게 함)은 무시
+                        st0 = max(st0, cand)
+                if use_stage:                                       # 단계 위치: 창 안에서 (창 길이 - 작업 길이) × stage 지점 이후
+                    st0 = max(st0, ws + dt.timedelta(days=round(est[c]["stage"] * (span_days - dur))))
+                st0 = min(st0, max(ws, latest))
+                out[c] = (st0, st0 + dt.timedelta(days=dur - 1))
+            return out
+
+        first = lay(1.0)
+        used = (max(e for _, e in first.values()) - ws).days + 1
+        if ai:                                                       # 긴 흐름이 넘치면 줄이고, 모자라면 1.5배까지만 늘린 뒤 단계 위치로 펼침
+            res = lay(span_days / used if used > span_days else min(span_days / used, 1.5), use_stage=True)
+        else:                                                        # 규칙 기반(순차 사슬): 사슬이 창을 꽉 채우도록 비례 조정
+            res = lay(span_days / used) if used != span_days else first
+        for c, (s, e) in res.items():
+            e = min(e, we)
+            s = min(s, e)
+            t = by_code[c]
+            t["s"], t["e"] = s, e
+            t["basis"] = (f"추정(공수 {est[c]['weeks']}주" + (", AI" if ai else ", 순차")
+                          + (", 원문 기간 불명확" if t.get("weak") else "") + ")")
+    # 묶음 행 = 하위 기간 합 (새로 배치된 작업 반영)
+    for c in sorted(codes, key=lambda c: -c.count(".")):
+        ks = [by_code[k] for k in codes if k.startswith(c + ".") and k.count(".") == c.count(".") + 1 and by_code[k]["s"]]
+        p = by_code[c]
+        if ks and p.get("basis") != "마일스톤 묶음":
+            lo, hi = min(k["s"] for k in ks), max(k["e"] for k in ks)
+            if not p["s"]:
+                p["s"], p["e"], p["basis"] = lo, hi, "하위 합산"
+            else:
+                p["s"], p["e"] = min(p["s"], lo), max(p["e"], hi)
+
+
+WEAK_KEEP = re.compile(r"(과업|사업|프로젝트|연구)\s*관리|진도|보고|회의|자문|PMO|운영위원|품질\s*보증")
+
+
+def drop_weak_dates(by_code, codes, project, base):
+    """AI 가 문서에 없는 기간 대신 '사업 전체 기간'이나 '상위 작업과 똑같은 기간'을 채워 넣은 말단 작업의 날짜를 지움.
+    (이런 날짜는 정보가 없고, 그대로 두면 모든 막대가 같은 길이·같은 위치가 됨.) 일정표(●·■)에서 계산한 기간과
+    과업관리·보고·자문처럼 원래 전 기간에 걸치는 작업은 그대로 둠. 지운 작업은 schedule_undated 가 공수로 다시 배치."""
+    dated = [by_code[c] for c in codes if by_code[c]["s"]]
+    if not dated:
+        return
+    ps, pe = parse_when(project.get("start"), base), parse_when(project.get("end"), base)
+    lo = min([t["s"] for t in dated] + ([ps[0]] if ps else []))
+    hi = max([t["e"] for t in dated] + ([pe[1]] if pe else []))
+    P = (hi - lo).days + 1
+    if P < 120:
+        return
+    kids = {c: [k for k in codes if k.startswith(c + ".") and k.count(".") == c.count(".") + 1] for c in codes}
+    for c in codes:
+        t = by_code[c]
+        if kids[c] or not t["s"] or t.get("ms") or t.get("basis") != "문서" or WEAK_KEEP.search(t["name"]):
+            continue
+        span = (t["e"] - t["s"]).days + 1
+        par = by_code.get(c.rsplit(".", 1)[0]) if "." in c else None
+        same_as_parent = False
+        if par and par["s"] and (t["s"], t["e"]) == (par["s"], par["e"]):
+            same = [k for k in kids[c.rsplit(".", 1)[0]] if (by_code[k]["s"], by_code[k]["e"]) == (t["s"], t["e"])]
+            same_as_parent = len(same) >= 2
+        if span >= 0.9 * P or same_as_parent:
+            t["s"] = t["e"] = None
+            t["basis"] = ""
+            t["weak"] = True
+
+
+def build(raw: dict, doc_text: str, user_start: dt.date = None, user_end: dt.date = None, chat_fn=None,
+          request: str = "", progress=None):
+    """LLM 원본 → 정리된 WBS. 반환 {'project':{name,start,end}, 'tasks':[...] }
+    user_start/user_end: 사용자가 정한 사업 기간(우선). chat_fn: 날짜 없는 작업의 공수 추정용(없으면 규칙 기반 배치)."""
     project, items = raw.get("project") or {}, raw.get("tasks") or []
     base = guess_base(project, items, user_start or doc_start(doc_text))
     by_code, by_name, order = {}, {}, []
@@ -396,6 +595,7 @@ def build(raw: dict, doc_text: str, user_start: dt.date = None):
                              "src": n, "ms": False}
 
     codes = sorted(by_code, key=_key)
+    drop_weak_dates(by_code, codes, project, base)
     for c in codes:                                         # 하위 작업이 있는 묶음 행은 마일스톤이 아님
         if by_code[c].get("ms") and any(k.startswith(c + ".") for k in codes):
             by_code[c]["ms"] = False
@@ -415,13 +615,6 @@ def build(raw: dict, doc_text: str, user_start: dt.date = None):
         if kids and all(k.get("ms") for k in kids):
             by_code[c]["s"] = by_code[c]["e"] = None
             by_code[c]["basis"] = "마일스톤 묶음"
-    # 기간이 없는 하위 항목 = 상위 기간을 물려받음 (추정 표시)
-    for c in codes:
-        t = by_code[c]
-        if not t["s"] and "." in c:
-            par = by_code.get(c.rsplit(".", 1)[0])
-            if par and par["s"]:
-                t["s"], t["e"], t["basis"] = par["s"], par["e"], "추정(상위 기간)"
     dated = [by_code[c] for c in codes if by_code[c]["s"]]
     ps = parse_when(project.get("start"), base)
     pe = parse_when(project.get("end"), base)
@@ -432,6 +625,12 @@ def build(raw: dict, doc_text: str, user_start: dt.date = None):
             p_end = max(p_end, _month_end(_add_months(base, int(project["months"]) - 1)))
         except Exception:
             pass
+    if user_start:                                          # 사용자가 정한 사업 기간이 우선
+        p_start = user_start
+    if user_end and user_end > p_start:
+        p_end = user_end
+    # 기간이 없는 작업 → 공수(소요 주) 추정 후 사업 기간(또는 날짜 있는 상위 작업 기간) 안에 배치
+    schedule_undated(by_code, codes, p_start, p_end, chat_fn, request, progress)
     doc_norm = _norm(doc_text)
     tasks = []
     for c in codes:

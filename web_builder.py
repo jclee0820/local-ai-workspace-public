@@ -288,8 +288,16 @@ document.querySelectorAll('.reveal').forEach(el=>io.observe(el));</script></body
 
 # ------------------------------------------------------------------ 전체 파이프라인
 QUERY_SYS = """사용자의 웹페이지 제작 요청에서 '조사할 주제'만 뽑아 위키백과 검색어를 만든다.
-'웹페이지, 디자인, 만들어줘, 보여주는, 아이덴티티' 같은 제작 지시 단어는 빼라.
-출력 JSON: {"core":"주제 핵심어 1개(예: 듄)","ko":"한국어 검색어(2~4단어)","en":"English search query (2-4 words)"}"""
+'웹페이지, 디자인, 만들어줘, 보여주는, 아이덴티티, 소개, 페이지, 정리' 같은 제작 지시 단어와 '포스터·주인공·연대별' 같은 구성 요소는 빼라.
+core 는 요청에 글자 그대로 나온 주제 이름에서 '캐넌·세계관·시리즈·영화·드라마·유니버스' 같은 수식어를 뺀 가장 짧은 이름
+(예: '스타워즈 캐넌 세계관' → 스타워즈, '듄 시리즈' → 듄), en_core 는 그 주제의 영어 공식 이름(예: Star Wars, Dune).
+출력 JSON: {"core":"주제 핵심어 1개","en_core":"English name of the subject","ko":"한국어 검색어(2~4단어)","en":"English search query (2-4 words)"}"""
+
+
+CAND_SYS = """주제 '{core}'({en}) 에 대해 한국어 위키백과에서 찾아볼 문서 제목 후보를 JSON 으로 낸다.
+- works: 이 주제에 속한 영화·드라마·애니메이션 시리즈의 한국어 정식 제목(위키백과 표제어 형태), 중요한 것부터 최대 18개.
+- people: 작품 속 주인공·핵심 등장인물(가상 인물) 이름, 최대 8개. 배우·감독 이름은 넣지 않는다.
+모르면 빈 목록. 출력 JSON: {{"works":[""],"people":[""]}}"""
 
 
 def _rule_core(request):
@@ -299,20 +307,25 @@ def _rule_core(request):
 
 def make_queries(request, chat_fn):
     """검색어 생성. 모델이 희귀 글자(예: '듄'→'드류')를 바꿔 쓰는 경우가 있어 요청 원문과 대조해 보정."""
-    core, ko, en = _rule_core(request), "", ""
+    core, ko, en, en_core = _rule_core(request), "", "", ""
     try:
         q = json.loads(chat_fn([{"role": "system", "content": QUERY_SYS}, {"role": "user", "content": request}],
-                               {"temperature": 0.1, "num_ctx": 2048, "num_predict": 120}, fmt="json"))
+                               {"temperature": 0.1, "num_ctx": 2048, "num_predict": 150}, fmt="json"))
         if q.get("core") and q["core"].strip() in request:
             core = q["core"].strip()
-        ko, en = q.get("ko", ""), q.get("en", "")
+        while True:                                          # '스타워즈 캐넌' → '스타워즈' (수식어가 붙으면 위키 제목과 안 맞음)
+            c2 = re.sub(r"\s*(캐넌|정사|세계관|시리즈|영화|드라마|애니메이션|프랜차이즈|유니버스|전체|작품)$", "", core).strip()
+            if c2 == core or not c2:
+                break
+            core = c2
+        ko, en, en_core = q.get("ko", ""), q.get("en", ""), str(q.get("en_core") or "").strip()
     except Exception:
         pass
     qual = re.search(re.escape(core) + r"\s*\(([^)]{1,12})\)", request)          # 듄(영화) → '영화'
     qual = qual.group(1).strip() if qual else ""
     words = [w for w in re.split(r"\s+", ko) if w and w != core and w != qual and w in request]   # 요청에 실제로 있는 단어만
     ko = " ".join([core] + ([qual] if qual else []) + words[:1]) if (qual or words) else f"{core} 시리즈"
-    return {"core": core, "ko": ko, "en": en or core, "qual": qual}
+    return {"core": core, "ko": ko, "en": en or core, "qual": qual, "en_core": en_core}
 
 
 PH = "TERMX"   # 주제어 보호용 표식 (모델은 영문 식별자를 그대로 복사하는 데 강함)
@@ -356,6 +369,7 @@ def _restore(obj, core):
 PLAN_SYS = """웹페이지 구성을 기획한다. 사용자 요청의 구성 요소마다 섹션을 1개씩 만든다(최대 5개, 요청에 없는 섹션 금지).
 focus 는 다음 중 하나: 세계관, 전개, 인물, 줄거리, 역사, 특징, 평가
 layout: 세계관·특징·평가·줄거리=prose, 전개·역사=timeline, 인물=cards
+heading 은 섹션 내용을 그대로 말하는 평이한 제목(예: 연대별 작품, 주요 인물, 세계관과 설정) — 비유·문학적 표현 금지.
 title 은 주제명(짧게). tagline 은 주제의 본질(배경·분위기·핵심 갈등)을 담은 15~30자 한 줄 소개로,
 구체적 수치·연도 없이 쓴다. '웹페이지, 디자인, 아이덴티티, 디지털' 같은 제작 관련 단어는 금지.
 출력 JSON: {"title":"","tagline":"","sections":[{"nav":"메뉴명(2~5자)","heading":"섹션 제목","focus":"","layout":""}]}"""
@@ -385,18 +399,22 @@ def timeline_from_pages(pages, core):
     """작품 문서 첫 단락에서 공개 연도·감독을 직접 읽어 타임라인 항목 생성 (모델 누락 보완용)."""
     out = []
     for p in pages:
-        if p.get("lang") != "ko" or not p.get("sections") or core not in p["title"] or "동음이의" in p["title"]:
+        if p.get("lang") != "ko" or not p.get("sections") or "동음이의" in p["title"] or p.get("kind") == "person" \
+                or (core not in p["title"] and p.get("kind") != "work"):     # 후보 작품(이미 첫 단락으로 검증)은 제목에 주제어 없어도 됨
             continue
         intro = p["sections"][0][1][:400]
         m = YEAR_RE.search(intro)
-        if not m:
-            m2 = re.search(r"(\d{4})년\s*(?:미국의\s*)?(?:SF|공상 과학|서사)?\s*영화", intro)
+        if not m:                                     # '1980년 미국의 서사 스페이스 오페라 영화' 처럼 수식어가 긴 경우까지
+            m2 = re.search(r"(\d{4})년[^.\n]{0,40}?(영화|드라마|애니메이션|텔레비전 시리즈|웹 시리즈)", intro)
             if not m2:
                 continue
-            year, verb = m2.group(1), "개봉"
+            year, verb = m2.group(1), ("방영" if m2.group(2) in ("드라마", "텔레비전 시리즈", "웹 시리즈") else "개봉")
         else:
             year, verb = m.group(1), m.group(2)
         title = re.sub(r"\s*\(\d{4}년 영화\)|\s*\((소설|영화|드라마)\)", "", p["title"]).strip()
+        ep = re.search(r"(에피소드\s*\d+\s*[:：]\s*[가-힣A-Za-z0-9 ]{2,20}?)(?=[)\],.]|으로|로\s|이라)", intro)
+        if ep and "에피소드" not in title:                # '스타워즈 (영화)' → '스타워즈 에피소드 4: 새로운 희망'
+            title = f"{title} {ep.group(1).strip()}"
         kind = "소설" if verb in ("출판", "출간") else ("드라마" if verb == "방영" else "영화")
         if kind == "소설" and "소설" not in title:
             title += " (원작 소설)"
@@ -404,7 +422,20 @@ def timeline_from_pages(pages, core):
         sub = f"{d.group(1)} 감독 {kind}" if d and kind == "영화" else kind
         first = re.split(r"(?<=[다음])\.\s", re.sub(r"\(영어:[^)]*\)", "", intro))[0].strip()
         out.append({"tag": year, "title": title, "subtitle": sub + (" (개봉 예정)" if verb == "개봉 예정" else ""),
-                    "body": first[:90] + ("…" if len(first) > 90 else ""), "evidence": intro[:30]})
+                    "body": first[:90] + ("…" if len(first) > 90 else ""), "evidence": intro[:30], "wiki": p["title"]})
+    return out
+
+
+def people_from_pages(pages):
+    """등장인물 문서(collect 에서 '가상 인물' 여부를 첫 단락으로 확인한 것)의 첫 문장으로 인물 카드 항목 생성."""
+    out = []
+    for p in pages:
+        if p.get("kind") != "person" or not p.get("sections"):
+            continue
+        intro = re.sub(r"\([^)]*\)", "", p["sections"][0][1][:400])
+        first = re.split(r"(?<=[다음])\.\s", intro)[0].strip()
+        out.append({"title": re.sub(r"\s*\([^)]*\)", "", p["title"]).strip(), "subtitle": "",
+                    "body": first[:100] + ("…" if len(first) > 100 else ""), "evidence": intro[:30], "wiki": p["title"]})
     return out
 
 
@@ -418,7 +449,7 @@ def _merge_timeline(items, auto):
         return _norm(re.sub(r"\(.*?\)|part\s*[ivx0-9]+|파트\s*1", "", it.get("title", ""), flags=re.I))
 
     out = []
-    for it in items + auto:
+    for it in auto + items:                       # 위키 첫 단락에서 읽은 항목(연도·문서 제목 정확)을 먼저
         it["tag"] = year(it) or it.get("tag", "")
         dup = any(year(o) == year(it) and (core(o) in core(it) or core(it) in core(o)) for o in out)
         if not dup:
@@ -456,8 +487,17 @@ def build(request: str, chat_fn, progress=None, use_research=True, extra_context
             base = re.sub(r"\s*\([^)]*\)", "", core).strip()
             q.update(core=base, qual=qual.group(1) if qual else "", ko=f"{base} {qual.group(1)}" if qual else base)
         say(0.08, f"🔑 검색어: {q['ko']} / {q['en']}")
+        cand = {}
+        if re.search(r"시리즈|영화|드라마|애니메이션|작품|연대|연표|순서|에피소드|주인공|등장\s*인물|인물|캐릭터", request):
+            say(0.1, "🗒️ 찾아볼 작품·인물 후보 정리 중…")      # 제목에 주제어가 없는 문서(제국의 역습·루크 스카이워커 등)까지 찾기 위한 후보
+            try:                                              # (후보일 뿐 — 위키백과 문서 첫 단락으로 진짜 그 작품·인물인지 확인 후 사용)
+                cand = json.loads(chat_fn([{"role": "system", "content": CAND_SYS.format(core=q["core"], en=q.get("en_core", ""))},
+                                           {"role": "user", "content": request}],
+                                          {"temperature": 0.1, "num_ctx": 2048, "num_predict": 700}, fmt="json"))
+            except Exception:
+                cand = {}
         pages = fact_research.collect(request, q["ko"], q["core"], q["en"], q.get("qual", ""),
-                                      progress=lambda m: say(0.12, m))
+                                      progress=lambda m: say(0.12, m), en_core=q.get("en_core", ""), candidates=cand)
     if extra_context:
         pages.append({"lang": "ko", "title": "내부 문서(RAG)", "url": "", "sections": [("개요", extra_context)]})
     if not pages:
@@ -474,6 +514,12 @@ def build(request: str, chat_fn, progress=None, use_research=True, extra_context
         {"nav": "개요", "heading": "개요", "focus": "세계관", "layout": "prose"}]
     if not re.search(r"수치|통계|숫자|기록|흥행|규모|매출", request):
         secs = [s for s in secs if s.get("layout") != "facts"]
+    # 요청에 있는데 기획에서 빠진 구성 요소는 채움 (예: '주인공' 요청에 인물 섹션이 없던 문제)
+    if re.search(r"주인공|등장\s*인물|인물|캐릭터", request) and not any(s.get("focus") == "인물" for s in secs):
+        secs.append({"nav": "인물", "heading": "주요 인물", "focus": "인물", "layout": "cards"})
+    if re.search(r"연대|연표|순서|시간\s*순|역사|흐름", request) and not any(s.get("layout") == "timeline" for s in secs):
+        secs.insert(0, {"nav": "연대기", "heading": "연대별 작품", "focus": "전개", "layout": "timeline"})
+    secs = secs[:6]
     content = {"title": plan.get("title") or core, "tagline": plan.get("tagline", ""), "subtitle": "", "sections": []}
     removed, used_ctx = 0, []
     for i, sec in enumerate(secs):
@@ -497,9 +543,35 @@ def build(request: str, chat_fn, progress=None, use_research=True, extra_context
                 s["items"] = _merge_timeline(s["items"], auto)
             if not one["sections"] and auto:
                 one["sections"] = [dict(sec, intro=intro, items=_merge_timeline([], auto))]
+        if sec.get("focus") == "인물":                  # 등장인물 문서(첫 단락으로 검증됨)에서 빠진 인물을 채움
+            auto = _protect_list(people_from_pages(pages), core)
+            if not one["sections"] and auto:
+                one["sections"] = [dict(sec, intro=intro, items=[])]
+            for s in one["sections"]:
+                have = [_norm(it.get("title")) for it in s["items"]]
+                for a in auto:
+                    k = _norm(a["title"])
+                    if not any(k in h or h in k for h in have if h):
+                        s["items"].append(a)
+                        have.append(k)
+                s["items"] = s["items"][:8]
         content["sections"] += one["sections"]
         used_ctx.append(ctx)
     content = _restore(content, core)
+    ko_main = [p for p in pages if p.get("lang") == "ko" and p.get("kind") != "person" and p.get("sections")]
+    main = next((p for p in ko_main if p["title"] == core), None) or \
+        next((p for p in ko_main if re.sub(r"\s*\([^)]*\)", "", p["title"]).strip() == core
+              and not re.search(r"\((영화|소설|드라마|\d{4}년)", p["title"])), None)   # 주제 대표 문서가 있을 때만(개별 작품 문서로 쓰면 엉뚱해짐)
+    if main:                                                # 한 줄 소개는 대표 문서 첫 단락을 근거로 (기획 단계 소개는 지어낸 표현이 많음)
+        try:
+            tg = json.loads(chat_fn([{"role": "system", "content": "[자료]만 근거로 이 주제를 소개하는 15~30자 한국어 한 줄을 쓴다. "
+                                                                   "자료에 없는 설정·비유 금지. 출력 JSON: {\"tagline\":\"\"}"},
+                                     {"role": "user", "content": f"주제: {core}\n[자료]\n{main['sections'][0][1][:900]}"}],
+                                    {"temperature": 0.2, "num_ctx": 2048, "num_predict": 80}, fmt="json"))
+            if 8 <= len(str(tg.get("tagline") or "").strip()) <= 45:
+                content["tagline"] = str(tg["tagline"]).strip()
+        except Exception:
+            pass
     say(0.85, "🎨 디자인 테마 선택 중...")
     try:
         theme = json.loads(chat_fn([{"role": "system", "content": THEME_SYS},
@@ -510,4 +582,4 @@ def build(request: str, chat_fn, progress=None, use_research=True, extra_context
     sources = [{"title": f"{p['title']} - 위키백과({p['lang']})", "url": p["url"]} for p in pages if p.get("url")]
     say(1.0, "✅ 완료")
     return {"html": render(content, theme, sources, trend), "content": content, "theme": fix_theme(theme),
-            "sources": sources, "removed": removed, "context": "\n\n".join(used_ctx)}
+            "sources": sources, "removed": removed, "context": "\n\n".join(used_ctx), "query": q}

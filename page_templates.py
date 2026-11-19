@@ -129,16 +129,101 @@ document.querySelectorAll('.reveal').forEach(el=>_io.observe(el));</script><scri
 
 
 # ================================================================== 틀 1·3: 주제 소개 / 연표 (위키백과)
-def _wiki_sections(content, timeline_first=False):
+STORY_SYS = """다음은 '{core}' 의 작품 목록(공개 연도)이다. 이 작품들을 '작품 속(세계관 내부) 시간 순서'로 정렬하고,
+각 작품의 작품 속 시점을 짧게 적는다(예: '32 BBY', '19 BBY~', '0 ABY', '34 ABY', 연호가 없으면 '제국 성립 직후' 같은 짧은 말).
+- 목록에 있는 제목만 그대로 쓴다. 추가·변경 금지. 시점을 모르는 작품은 맨 뒤에 era "" 로.
+출력 JSON: {{"order":[{{"title":"","era":""}}]}}"""
+STORY_WORDS = re.compile(r"작품\s*속|극\s*중|세계관\s*(속|내|기준|안)|내부\s*시간|in[-\s]?universe|시간대\s*순|스토리\s*순", re.I)
+
+
+def _norm_t(s):
+    return re.sub(r"[\s\W_]+", "", str(s or "")).lower()
+
+
+def _story_order(content, core, chat_fn):
+    """연표 항목을 작품 속 시간 순서로: {제목키: (순번, 작품 속 시점)}. 공개 연도는 그대로 두고 표시만 함."""
+    items, seen = [], set()
+    for s in content.get("sections", []):
+        if s.get("layout") == "timeline":
+            for it in s.get("items", []):
+                k = _norm_t(it.get("title"))
+                if k and k not in seen:
+                    seen.add(k)
+                    items.append(it)
+    if len(items) < 2:
+        return {}
+    import product_builder as pb
+    keys = {_norm_t(it["title"]): it for it in items}
+
+    def match(t):                                       # 모델이 제목을 조금 바꿔 쓰는 경우('스타워즈 (1977)')까지 짝 맞춤
+        k = _norm_t(re.sub(r"\([^)]*\)", "", str(t or "")))
+        if k in keys:
+            return k
+        cands = [kk for kk in keys if k and (k in kk or kk in k)]
+        return min(cands, key=lambda kk: abs(len(kk) - len(k))) if cands else None
+
+    def ask(its):
+        try:
+            return pb._json(chat_fn, STORY_SYS.format(core=core),
+                            "\n".join(f"- {it['title']} ({it.get('tag') or '연도 미상'})" for it in its), num_predict=1200)
+        except Exception:
+            return {}
+
+    out = {}
+
+    def take(d, base):
+        for i, x in enumerate((d or {}).get("order") or []):
+            k = match((x or {}).get("title"))
+            if k and k not in out:
+                era = str(x.get("era") or "").strip()
+                if re.search(r"era|[\"'“”]|모름|미상|unknown", era, re.I) or len(era) > 20:   # 'era ""' 같은 찌꺼기는 시점 미상으로
+                    era = ""
+                out[k] = (base + i, era)
+
+    take(ask(items), 0)
+    miss = [keys[k] for k in keys if k not in out or not out[k][1]]
+    if miss and len(miss) < len(items):                 # 빠뜨렸거나 시점이 빈 작품만 한 번 더
+        for it in miss:
+            out.pop(_norm_t(it["title"]), None)
+        take(ask(miss), 500)
+    for k in keys:                                      # 그래도 빠진 작품은 맨 뒤
+        out.setdefault(k, (999, ""))
+
+    def num(era):                                       # 'BBY/ABY' 처럼 숫자 연호면 그 숫자로 정렬 (BBY 는 음수)
+        m = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:~\s*\d+\s*)?(BBY|ABY|BC|AD|기원전|년)", era, re.I)
+        if not m:
+            return None
+        v = float(m.group(1))
+        return -v if m.group(2).upper() in ("BBY", "BC") or m.group(2) == "기원전" else v
+    nums = {k: num(e) for k, (_, e) in out.items() if e}
+    if nums and sum(v is not None for v in nums.values()) >= 0.6 * len(nums):
+        ranked = sorted(out, key=lambda k: (nums.get(k) is None, nums.get(k) if nums.get(k) is not None else 0, out[k][0]))
+        out = {k: (i if out[k][1] else 900 + i, out[k][1]) for i, k in enumerate(ranked)}
+    else:
+        out = {k: (r if e else 900 + r, e) for k, (r, e) in out.items()}
+    return out
+
+
+def _wiki_sections(content, timeline_first=False, story=None):
     out, tl_items, keys = [], [], []
+    tl_at, tl_seen = None, set()
     for s in content.get("sections", []):
         lay, items = s.get("layout"), s.get("items", [])
-        if lay == "timeline":
-            tl_items += [{"year": it.get("tag"), "title": it.get("title"), "sub": it.get("subtitle"), "body": it.get("body")} for it in items]
-            out.append({"nav": s.get("nav"), "heading": s.get("heading"), "intro": s.get("intro"), "html": wc.timeline(tl_items[-len(items):])})
+        if lay == "timeline":                           # 연표 섹션이 여럿이면 하나로 합침(같은 작품 중복 제거, 연도순)
+            for it in items:
+                k = re.sub(r"[\s\W_]+", "", str(it.get("title") or "")).lower()
+                if not k or k in tl_seen:
+                    continue
+                tl_seen.add(k)
+                tl_items.append({"year": it.get("tag"), "title": it.get("title"), "sub": it.get("subtitle"), "body": it.get("body"),
+                                 "img": it.get("img")})
+            if tl_at is None:
+                tl_at = len(out)
+                out.append({"nav": s.get("nav"), "heading": s.get("heading"), "intro": s.get("intro"), "html": ""})
         elif lay == "cards":
             out.append({"nav": s.get("nav"), "heading": s.get("heading"), "intro": s.get("intro"),
-                        "html": wc.tilt_cards([{"title": it.get("title"), "sub": it.get("subtitle"), "body": it.get("body"), "tag": it.get("tag")} for it in items])})
+                        "html": wc.tilt_cards([{"title": it.get("title"), "sub": it.get("subtitle"), "body": it.get("body"), "tag": it.get("tag"),
+                                                "img": it.get("img")} for it in items])})
         else:
             keys.append(s)
             items = [it for it in items if (it.get("title") or "").strip() and (it.get("body") or "").strip()]
@@ -148,19 +233,117 @@ def _wiki_sections(content, timeline_first=False):
             if items:
                 body += wc.tilt_cards([{"title": it.get("title"), "body": it.get("body")} for it in items])
             out.append({"nav": s.get("nav"), "heading": s.get("heading"), "html": body})
+    if tl_at is not None:
+        def _y(it):
+            m = re.search(r"\d{4}", str(it.get("year") or ""))
+            return int(m.group(0)) if m else 9999
+        if story:                                       # 작품 속 시간 순서: 시점을 앞에, 공개 연도는 부제로
+            tl_items.sort(key=lambda it: (story.get(_norm_t(it["title"]), (999, ""))[0], _y(it)))
+            for it in tl_items:
+                era = story.get(_norm_t(it["title"]), (999, ""))[1]
+                rel = it.get("year") or ""
+                it["sub"] = " · ".join(x for x in (f"{rel}년 공개" if re.fullmatch(r"\d{4}", str(rel)) else rel, it.get("sub")) if x)
+                it["year"] = era or "시점 미상"
+            out[tl_at]["intro"] = ("작품 속 시간 순서입니다. 왼쪽의 작품 속 시점(BBY·ABY 등)은 AI가 정리한 것이라 공식 연표와 대조가 필요하며, "
+                                   "공개 연도는 각 작품의 위키백과 문서 기준입니다.")
+        else:
+            tl_items.sort(key=_y)
+        out[tl_at]["html"] = wc.timeline(tl_items)
+    out = [s for s in out if s["html"]]
     if timeline_first:
         out.sort(key=lambda s: 0 if 'data-wc="timeline"' in s["html"] else 1)
     return out
 
 
+REQ_WORDS = re.compile(r"만들어|해\s*줘|해\s*주세요|정리해|소개\s*(페이지|해)|페이지|보여\s*줘|알려\s*줘|작성|구성해")
+EN_NAMES_SYS = """아래 목록 각 항목의 영어 공식 이름(영화·드라마는 영어 원제, 인물은 영어 이름)을 같은 순서로 JSON 으로 낸다. 모르면 "".
+주제: {core}
+출력 JSON: {{"names":["",""]}}"""
+
+
+def _is_subject(topic):
+    """'듄', '경부고속도로' 같은 주제명인지, '…소개 페이지를 만들어줘' 같은 요청 문장인지."""
+    return len(topic) <= 20 and not REQ_WORDS.search(topic)
+
+
+def _add_images(content, core, en_core, chat_fn, posters, people, say):
+    """요청에 포스터·사진이 있으면 연표 항목엔 포스터, 인물 카드엔 인물 사진을 붙임(웹 이미지 검색 + 그림 판별)."""
+    import product_builder as pb
+    groups = {}                                          # 같은 제목(연표 섹션 중복 등)은 한 번만 찾아 함께 씀
+    for s in content.get("sections", []):
+        kind = "poster" if s.get("layout") == "timeline" and posters else \
+               "person" if s.get("layout") == "cards" and s.get("focus") == "인물" and people else None
+        if not kind:
+            continue
+        for it in s.get("items", [])[:16]:
+            k = re.sub(r"[\s\W_]+", "", str(it.get("title") or "")).lower()
+            if k:
+                groups.setdefault((k, kind), []).append(it)
+    jobs = [(its[0], kind, its) for (k, kind), its in list(groups.items())[:20]]
+    if not jobs:
+        return 0
+    try:
+        en = pb._json(chat_fn, EN_NAMES_SYS.format(core=f"{core} ({en_core})" if en_core else core),
+                      "\n".join(it["title"] for it, _, _ in jobs), num_predict=600, num_ctx=2048).get("names") or []
+    except Exception:
+        en = []
+    got = 0
+    for i, (it, kind, same) in enumerate(jobs):
+        say(0.86 + 0.1 * i / len(jobs), f"🖼️ [{i + 1}/{len(jobs)}] {it['title']} {'포스터' if kind == 'poster' else '사진'} 찾는 중…")
+        nm = (en[i] if i < len(en) and isinstance(en[i], str) else "").strip()
+        probe = {"name": it["title"], "maker": en_core or core,
+                 "name_en": (f"{nm} poster" if kind == "poster" else f"{nm} {en_core}").strip() if nm else ""}
+        try:                                             # 1순위: 그 작품·인물 위키백과 문서의 대표 그림(정보상자 포스터·사진)
+            import fact_research as fr
+            url = fr.wiki_image(it.get("wiki") or it["title"]) or (fr.wiki_image(nm, "en") if nm else "")
+            uri = pb._to_data_uri(url, "https://ko.wikipedia.org/") if url else ""
+            if uri:
+                probe["image"] = uri
+        except Exception:
+            pass
+        if not probe.get("image"):                       # 2순위: 웹 이미지 검색 + 그림 판별
+            try:
+                _item_photo(probe, (en_core or core) + (" poster" if kind == "poster" else ""), chat_fn)
+            except Exception:
+                continue
+        if probe.get("image"):
+            for x in same:
+                x["img"] = probe["image"]
+            got += 1
+    return got
+
+
 def build_topic(form, chat_fn, progress=None, history=False):
     import web_builder as wb
-    topic = form["topic"].strip()
-    req = f"{topic} — {form.get('focus') or ('역사와 주요 사건을 시간 순으로' if history else '개요, 전개, 주요 인물')}"
-    res = wb.build(req, chat_fn, progress, core=topic, allow_product=False, extra_context=form.get("extra", ""))
-    c = res["content"]
-    page = {"title": c.get("title") or topic, "tagline": c.get("tagline"), "eyebrow": "TIMELINE" if history else "INTRODUCTION",
-            "hero": form.get("hero", "particles"), "sections": _wiki_sections(c, timeline_first=history),
+    say = progress or (lambda f, m: None)
+    topic, focus = form["topic"].strip(), (form.get("focus") or "").strip()
+    if _is_subject(topic):                              # 주제명만 적은 경우: 그대로 주제로 씀
+        core = topic
+        req = f"{topic} — {focus or ('역사와 주요 사건을 시간 순으로' if history else '개요, 전개, 주요 인물')}"
+    else:                                               # 요청 문장: 주제는 AI가 문장에서 뽑고, 문장 전체(포스터·주인공 등)는 구성에 반영
+        core = None
+        req = topic + (f" — {focus}" if focus else "")
+        if history and not re.search(r"연대|연표|순서|역사|시간\s*순|흐름", req):
+            req += " — 역사와 주요 사건을 시간 순으로"
+    res = wb.build(req, chat_fn, progress, core=core, allow_product=False, extra_context=form.get("extra", ""))
+    c, q = res["content"], res.get("query") or {}
+    subj = q.get("core") or core or topic
+    title = c.get("title") or subj
+    if not _is_subject(title):                          # 제목에 요청 문장이 그대로 들어가지 않게
+        title = subj
+    n_img = 0
+    if re.search(r"포스터|표지|사진|이미지|그림", req):
+        n_img = _add_images(c, subj, q.get("en_core", ""), chat_fn, posters=True,
+                            people=bool(re.search(r"주인공|인물|캐릭터|등장인물|배우", req)), say=say)
+    order = form.get("order") or "auto"                 # 연표 순서: release(공개 순) / story(작품 속 시간 순) / auto(요청 문장으로 판단)
+    if order == "auto":
+        order = "story" if STORY_WORDS.search(req) or (re.search(r"세계관", req) and re.search(r"연대|순서|시간\s*순", req)) else "release"
+    story = None
+    if history and order == "story":
+        say(0.97, "🧭 작품 속 시간 순서로 정리 중…")
+        story = _story_order(c, subj, chat_fn) or None
+    page = {"title": title, "tagline": c.get("tagline"), "eyebrow": "TIMELINE" if history else "INTRODUCTION",
+            "hero": form.get("hero", "particles"), "sections": _wiki_sections(c, timeline_first=history, story=story),
             "sources": res["sources"], "note": "본문은 위 자료를 근거로 로컬 AI가 정리했습니다(위키백과 본문: CC BY-SA 4.0). 근거가 확인되지 않은 항목은 뺐습니다."}
     return page, {"removed": res["removed"], "context": res["context"], "sources": res["sources"]}
 

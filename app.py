@@ -684,7 +684,7 @@ if PAGE == "slides":
                             help="PDF·한글(HWP/HWPX)·워드·파워포인트·엑셀·CSV·HTML·RTF·TXT·MD")
     if psrc:
         pdepth = st.radio("긴 문서 처리 방식",
-                          ["빠르게 (목차·각 절 요점을 골라 구성, 1～2분)", "꼼꼼하게 (문서 전체를 나눠 요약한 뒤 구성, 문서 길이에 따라 수 분～수십 분)"],
+                          ["빠르게 (장마다 각 절 요점만 넣어 한 장씩 작성)", "꼼꼼하게 (장마다 해당 원문을 더 길게 넣어 한 장씩 작성)"],
                           horizontal=True, key="ppt_depth")
     c1, c2 = st.columns([3, 1])
     ptopic = c1.text_area("발표 주제" + (" (선택 — 비우면 원 소스 보고서 전체를 발표 자료로 구성)" if psrc else ""),
@@ -694,47 +694,36 @@ if PAGE == "slides":
     if st.button("구성안 만들기", type="primary", key="ppt_btn", icon=":material/slideshow:") and (ptopic.strip() or psrc):
         style_rule = sthemes.THEMES.get(theme, {}).get("style", "")
         narrative = theme == "blue"                # 블루 테마는 존댓말 평서체 → 개조식 자동 교정 끔
-        src_texts, src_ctx = [], ""
+        src_texts = []
         for f in psrc or []:
             try:
-                src_texts.append((f.name, rag_engine.extract_text(f.name, f.getvalue())))
+                src_texts.append((f.name, rag_engine.extract_text(f.name, f.getvalue()), f.getvalue()))
             except Exception as e:
                 st.error(f"{f.name} 읽기 실패: {e}")
         if src_texts:
-            whole = "\n\n".join(f"===== {nm} =====\n{t}" for nm, t in src_texts)
-            if len(whole) <= 7000:
-                src_ctx = whole
-            elif SS.get("ppt_depth", "").startswith("꼼꼼"):
-                bar = st.progress(0.0)
-                with st.status("🔄 원 소스 보고서 전체 요약 중", expanded=True) as stt:
-                    def prog(fr, m):
-                        bar.progress(min(fr, 1.0))
-                        stt.update(label=m)
-                    r = mrs.summarize(whole, progress=prog, doc_name=", ".join(nm for nm, _ in src_texts),
-                                      extra_instruction="발표 슬라이드 구성용: 장·절 흐름, 핵심 수치, 표, 결론·시사점을 빠짐없이 보존")
-                    stt.update(label=f"✅ 요약 완료 ({r['chunks']}개 조각)", state="complete")
-                src_ctx = r["result"][:9000]
-            else:
-                import form_fill as _ff
-                per = max(2500, 7000 // len(src_texts))
-                src_ctx = "\n\n".join(f"===== {nm} =====\n{_ff.digest(t, per)}" for nm, t in src_texts)
-        if src_ctx:
-            names = ", ".join(nm for nm, _ in src_texts)
-            ask = (f"아래 [원 소스 보고서]({names})를 바탕으로 본문 슬라이드 {int(n)}장 구성안을 작성하라.\n"
-                   + (f"[발표 초점] {ptopic.strip()}\n" if ptopic.strip() else "[발표 초점] 보고서 전체 내용을 목차 흐름대로\n")
-                   + "- 보고서의 장·절 흐름을 따르고, 수치·표·고유명사는 원문 그대로 쓴다. 원문에 없는 내용·수치는 만들지 않는다.\n"
-                     "- 원문에 표가 있으면 핵심 표를 table 로 옮긴다. source 에는 원문 파일명과 장·절(또는 쪽)을 적는다.\n"
-                   + (f"[문체] {style_rule}\n" if style_rule else "") + SLIDE_SCHEMA)
-            raw = generate(ask, ptopic.strip() or names, src_ctx, "ppt",
-                           preset_override="④ 일반 비즈니스 서술형 (~입니다 체)" if narrative else None)
-            SS.results["ppt_src"] = "\n\n".join(t for _, t in src_texts)
-        else:
+            # 원 소스 기반: 장·절을 코드로 찾아 요청 장수만큼 배분 → 슬라이드마다 해당 부분 원문으로 한 장씩 생성.
+            # (예전: 요약 9천 자로 15장을 한 번에 → 8192 문맥에서 출력이 잘려 몇 장만 남고 표도 빠졌음)
+            import slide_builder
+            _pre = "④ 일반 비즈니스 서술형 (~입니다 체)" if narrative else SS.get("preset", sp.DEFAULT_PRESET)
+            bar = st.progress(0.0)
+            with st.status("🔄 원 소스 보고서로 슬라이드 구성 중", expanded=True) as stt:
+                def prog(fr, m):
+                    bar.progress(min(fr, 1.0))
+                    stt.update(label=m)
+                    st.caption(m)
+                SS.results["ppt"] = slide_builder.build(
+                    src_texts, int(n), ptopic.strip(), sp.get_system_prompt(_pre, with_sources=False),
+                    sp.get_options(_pre), style_rule, narrative, SS.get("ppt_depth", "").startswith("꼼꼼"), prog)
+                stt.update(label=f"✅ 슬라이드 {len(SS.results['ppt']['slides'])}장 완성", state="complete", expanded=False)
+            SS.results["ppt_src"] = "\n\n".join(t for _, t, _ in src_texts)
+            SS.results["ppt_raw"] = ""
+        elif ptopic.strip():
             raw = generate(f"'{ptopic}' 주제로 본문 슬라이드 {int(n)}장 구성안을 작성하라.\n"
                            + (f"[문체] {style_rule}\n" if style_rule else "") + SLIDE_SCHEMA, ptopic, "", "ppt",
                            preset_override="④ 일반 비즈니스 서술형 (~입니다 체)" if narrative else None)
             SS.results["ppt_src"] = ""
-        SS.results["ppt_raw"] = raw
-        SS.results["ppt"] = parse_slides(raw)
+            SS.results["ppt_raw"] = raw
+            SS.results["ppt"] = parse_slides(raw)
     d = SS.results.get("ppt")
     if d:
         if not d["slides"]:
@@ -748,7 +737,11 @@ if PAGE == "slides":
                         st.markdown(f"**KEY POINT** · {s['keypoint']}")
                     for lvl, t in s["bullets"]:
                         st.markdown("&nbsp;" * (lvl * 6) + ["□ ", "ㅇ ", "- "][lvl] + t)
-                    if s["table"]:
+                    if s.get("image"):
+                        st.image(s["image"], caption=s.get("caption") or None, width=520)
+                    elif s["table"] and s.get("caption"):
+                        st.caption(s["caption"])
+                    if s["table"] and not s.get("image"):
                         hdr = "| " + " | ".join(s["table"][0]) + " |\n|" + "---|" * len(s["table"][0]) + "\n"
                         st.markdown(hdr + "\n".join("| " + " | ".join(r) + " |" for r in s["table"][1:]))
                     if s.get("source"):
@@ -771,7 +764,7 @@ if PAGE == "slides":
                 import json as _json
                 remember("slides", d.get("title") or "발표 슬라이드", SS.results.get("ppt_raw"),
                          {"발표자료.pptx": data}, {"theme": theme},
-                         key=theme + _json.dumps(d, ensure_ascii=False, sort_keys=True, default=str))
+                         key=theme + _json.dumps(d, ensure_ascii=False, sort_keys=True, default=lambda o: f"<{len(o)}b>" if isinstance(o, bytes) else str(o)))
                 st.download_button(label, data, "발표자료.pptx",
                                    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
                                    key="ppt_dl", icon=":material/download:")
@@ -797,9 +790,16 @@ if PAGE == "web":
     st.markdown("**2. 내용**")
     form = {}
     if wkind in ("topic", "history"):
-        form["topic"] = st.text_input("주제", key="wt_topic", placeholder="예) 듄(영화) / 지능형교통체계 / 경부고속도로")
+        form["topic"] = st.text_input("주제 (주제 이름만 적어도 되고, 원하는 내용을 문장으로 적어도 됩니다)", key="wt_topic",
+                                      placeholder="예) 듄(영화) / 경부고속도로 / 스타워즈 영화·드라마를 작품 속 시간 순서로, 포스터와 주인공 포함")
         form["focus"] = st.text_input("강조할 내용 (선택)", key="wt_focus",
                                       placeholder="예) 세계관과 주요 인물 위주로" if wkind == "topic" else "예) 1990년대 이후 정책 변화 위주로")
+        if wkind == "history":
+            form["order"] = st.radio("연표 순서", ["auto", "release", "story"], horizontal=True, key="wt_order",
+                                     format_func={"auto": "자동 (요청 문장에 맞춤)", "release": "공개·발생 연도 순",
+                                                  "story": "작품 속 시간 순 (영화·소설 세계관)"}.get,
+                                     help="'작품 속 시간 순'은 시리즈 작품을 이야기 속 시점(예: 스타워즈 BBY·ABY) 순서로 놓습니다. "
+                                          "그 시점은 AI가 정리하므로 '확인 필요'로 표시됩니다.")
     elif wkind == "list":
         c1, c2 = st.columns([3, 1])
         form["topic"] = c1.text_input("무엇을 비교할까요 (분야)", key="wt_list", placeholder="예) 2026년 한국 흥행 영화 / 현재 판매 중인 AI 스마트 글래스")
@@ -964,13 +964,23 @@ if PAGE == "gantt":
     greq = st.text_area("추가 요청 (선택)", height=70, key="gantt_req",
                         placeholder="예) 2차년도 과업까지 3수준으로 나눠줘 / 보고·검수 일정을 마일스톤으로 넣어줘")
     g1, g2, g3 = st.columns(3)
-    auto_start = g1.toggle("사업 시작일은 문서에서 찾기", value=True, key="gantt_auto_start")
-    ustart = None if auto_start else g1.date_input("사업 시작일", _dt.date.today().replace(day=1), key="gantt_start")
+    auto_start = g1.toggle("사업 기간은 문서에서 찾기", value=True, key="gantt_auto_start",
+                           help="끄면 사업 시작일·종료일을 직접 정합니다. 문서에 날짜가 없는 작업은 "
+                                "AI가 추정한 공수(소요 주)와 선후 관계에 따라 이 기간 안에 배치합니다.")
+    ustart = uend = None
+    if not auto_start:
+        ustart = g1.date_input("사업 시작일", _dt.date.today().replace(day=1), key="gantt_start")
+        _y, _m = divmod(ustart.month - 1 + 11, 12)
+        _dflt_end = (_dt.date(ustart.year + _y, _m + 1, 1) + _dt.timedelta(days=31)).replace(day=1) - _dt.timedelta(days=1)
+        uend = g1.date_input("사업 종료일", _dflt_end, key="gantt_end")
+        if uend <= ustart:
+            g1.error("종료일이 시작일보다 뒤여야 합니다.")
     depth = g2.selectbox("분석 깊이", [1, 2, 3], index=1, key="gantt_depth",
                          format_func=lambda n: {1: "빠름 (1회, 약 2분)", 2: "표준 (2회, 약 4분)", 3: "정밀 (3회, 약 6분)"}[n])
     unit = g3.selectbox("간트 칸 단위", ["auto", "month", "week"], key="gantt_unit",
                         format_func=lambda u: {"auto": "자동 (6개월 이하는 주 단위)", "month": "월 단위", "week": "주 단위"}[u])
-    if st.button("WBS·일정 추출", type="primary", key="gantt_btn", icon=":material/view_timeline:") and gups:
+    if st.button("WBS·일정 추출", type="primary", key="gantt_btn", icon=":material/view_timeline:") and gups \
+            and not (uend and ustart and uend <= ustart):
         texts = []
         for f in gups:
             try:
@@ -987,7 +997,7 @@ if PAGE == "gantt":
                     stt.update(label=msg)
                 try:
                     raw = gb.extract(doc, llm_client.cached(), depth=depth, request=greq.strip(), progress=gprog)
-                    plan = gb.build(raw, doc, ustart)
+                    plan = gb.build(raw, doc, ustart, uend, llm_client.cached(), greq.strip(), gprog)
                     SS.results["gantt"] = plan
                     SS.results["gantt_src"] = ", ".join(f.name for f in gups)
                     SS.results["gantt_ver"] = SS.results.get("gantt_ver", 0) + 1
@@ -1053,6 +1063,10 @@ if PAGE == "gantt":
                 today = alt.Chart(pd.DataFrame({"t": [pd.Timestamp(_dt.date.today())]})).mark_rule(
                     color="#C00000", strokeDash=[4, 3]).encode(x="t:T")
                 st.altair_chart((bars + ms + today).properties(height=max(220, 24 * len(df))), width="stretch")
+            n_est = sum(1 for t in plan2["tasks"] if t["basis"].startswith("추정(공수"))
+            if n_est:
+                st.caption(f"문서에 날짜가 없던 작업 {n_est}개는 추정한 공수(소요 주)와 선후 관계로 사업 기간 안에 배치했습니다 "
+                           "('일정 근거' 칸에 '추정(공수 N주)' 표시, 엑셀에서는 빨간 글씨). 실제 계획에 맞게 시작일·종료일을 고쳐 쓰세요.")
             undated = [t["name"] for t in plan2["tasks"] if not t["start"] and t["basis"] != "마일스톤 묶음"]
             if undated:
                 st.caption("기간이 없어 차트에 안 나오는 작업: " + ", ".join(undated[:10]) + (" 외" if len(undated) > 10 else ""))

@@ -197,14 +197,16 @@ def accordion(items, open_first=True):
 
 
 def timeline(items):
-    """연도 슬라이더가 붙은 타임라인. items=[{'year','title','sub','body'}] — 슬라이더로 그 해까지 보기."""
+    """연도 슬라이더가 붙은 타임라인. items=[{'year','title','sub','body','img'}] — 슬라이더로 그 해까지 보기. img 가 있으면 포스터 썸네일."""
     years = [int(m.group(0)) for it in items for m in [re.search(r"\d{4}", str(it.get("year", "")))] if m]
     cid = _id("tl")
     lis = "".join(
         f'<li class="wc-tli tl-card reveal" data-y="{(re.search(r"[0-9]{4}", str(it.get("year", ""))) or [0])[0] if re.search(r"[0-9]{4}", str(it.get("year", ""))) else ""}">'
-        f'<span class="wc-tly">{_e(it.get("year"))}</span><div><h3>{_e(it.get("title"))}</h3>'
+        f'<span class="wc-tly">{_e(it.get("year"))}</span><div class="wc-tli-b">'
+        + (f'<img class="wc-tli-img" src="{it["img"]}" alt="{_e(it.get("title"))} 포스터" loading="lazy">' if it.get("img") else "")
+        + f'<div><h3>{_e(it.get("title"))}</h3>'
         + (f'<p class="wc-sub">{_e(it["sub"])}</p>' if it.get("sub") else "")
-        + (f'<p>{_e(it["body"])}</p>' if it.get("body") else "") + "</div></li>" for it in items)
+        + (f'<p>{_e(it["body"])}</p>' if it.get("body") else "") + "</div></div></li>" for it in items)
     slider = ""
     if len(set(years)) >= 3:
         lo, hi = min(years), max(years)
@@ -306,7 +308,8 @@ figure{margin:0} figcaption{font-weight:700;margin-bottom:10px;color:var(--tx)}
   border:1px solid color-mix(in srgb,var(--tx) 9%,transparent);transition:opacity .3s,transform .3s}
 .wc-tli::before{content:"";position:absolute;left:-28px;top:24px;width:14px;height:14px;border-radius:50%;background:var(--ac);box-shadow:0 0 0 5px color-mix(in srgb,var(--ac) 22%,transparent)}
 .wc-tli.off{display:none} .wc-tly{font-weight:800;color:var(--ac);font-size:1.1rem} .wc-tli h3{font-size:1.05rem;margin-bottom:4px} .wc-tli p:not(.wc-sub){color:var(--mu);font-size:.94rem}
-@media(max-width:640px){.wc-tli{grid-template-columns:1fr}}
+.wc-tli-b{display:flex;gap:16px;align-items:flex-start} .wc-tli-img{width:96px;height:140px;object-fit:cover;border-radius:10px;flex:none;box-shadow:0 6px 16px rgba(0,0,0,.18);background:#fff}
+@media(max-width:640px){.wc-tli{grid-template-columns:1fr} .wc-tli-img{width:72px;height:104px}}
 /* 핵심 수치 */
 .wc-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:18px}
 .wc-kpi{background:var(--sf);border-radius:18px;padding:24px;border:1px solid color-mix(in srgb,var(--tx) 9%,transparent);position:relative;overflow:hidden}
