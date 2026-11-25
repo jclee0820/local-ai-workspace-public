@@ -50,7 +50,7 @@ def requirements():
 
 
 def text_conv(data: bytes, name: str) -> bytes:
-    if name.endswith(".sh"):
+    if name.endswith((".sh", ".command")):
         return data.replace(b"\r\n", b"\n")
     if name.endswith(".ps1"):
         t = data.decode("utf-8-sig").replace("\r\n", "\n").replace("\n", "\r\n")
@@ -59,7 +59,7 @@ def text_conv(data: bytes, name: str) -> bytes:
 
 
 def build(target: str, req_linux: str, req_win: str, torch: str):
-    name = f"LocalAIWorkspace-{VERSION}-{target}"
+    name = f"LocalAIWorkspace-{VERSION}-{target}"        # 맥: LocalAIWorkspace-<버전>-mac.zip
     entries = {}                                          # 패키지 안 경로 → bytes
     for p, rel in app_files():
         with open(p, "rb") as f:
@@ -72,15 +72,25 @@ def build(target: str, req_linux: str, req_win: str, torch: str):
         entries[f"{name}/docs/사용_가이드.md"] = fh.read()
     with open(os.path.join(ROOT, "icons", "LICENSES.md"), "rb") as fh:
         entries[f"{name}/docs/아이콘_라이선스.md"] = fh.read()
-    sub = "linux" if target == "linux" else "windows-server"
+    sub = {"linux": "linux", "mac": "mac"}.get(target, "windows-server")
     for f in os.listdir(os.path.join(HERE, sub)):
         with open(os.path.join(HERE, sub, f), "rb") as fh:
-            entries[f"{name}/{sub}/{f}"] = text_conv(fh.read(), f)
-    entries[f"{name}/requirements-linux.txt" if target == "linux" else f"{name}/requirements-windows.txt"] = \
-        (req_linux if target == "linux" else req_win).encode("utf-8")
+            data = text_conv(fh.read(), f)
+        if target == "mac" and f == "install.command":       # 압축을 풀면 맨 위에 보이는 더블클릭용 파일
+            entries[f"{name}/설치하기.command"] = data
+        else:
+            entries[f"{name}/{sub}/{f}"] = data
+    entries[f"{name}/requirements-{'windows' if target == 'windows-server' else target}.txt"] = \
+        (req_win if target == "windows-server" else req_linux).encode("utf-8")
     entries[f"{name}/TORCH_VERSION"] = (torch + "\n").encode()
     entries[f"{name}/VERSION"] = f"{VERSION} ({dt.date.today()})\n".encode()
-    if target == "linux":
+    if target == "mac":
+        quick = ("로컬 AI 작업실 (맥북 · Apple 실리콘 M1 이후)\n\n"
+                 "1) 이 압축을 푼 폴더에서 '설치하기.command' 를 우클릭 → 열기 → 열기 (처음 한 번만 경고가 뜹니다)\n"
+                 "2) 터미널 창에서 자동으로 설치됩니다 (인터넷 필요, 수십 분). 관리자 암호는 필요 없습니다.\n"
+                 "3) 끝나면 바탕화면의 '로컬 AI 작업실' 아이콘을 더블클릭하면 브라우저에서 열립니다.\n"
+                 "※ 한컴오피스가 없어서 구형 .hwp 파일은 읽지 못합니다 (HWPX·PDF 는 가능). 인텔 맥은 지원하지 않습니다.\n")
+    elif target == "linux":
         quick = ("로컬 AI 작업실 (리눅스 서버)\n\n설치:  sudo ./linux/install.sh --password '접속비밀번호' --open-firewall\n"
                  "옵션·관리 방법: docs/INSTALL.md\n")
     else:
@@ -103,12 +113,16 @@ def build(target: str, req_linux: str, req_win: str, torch: str):
         out = os.path.join(DIST, name + ".zip")
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
             for arc, data in sorted(entries.items()):
-                zf.writestr(arc, data)
+                zi = zipfile.ZipInfo(arc, dt.datetime.now().timetuple()[:6])
+                zi.compress_type = zipfile.ZIP_DEFLATED
+                zi.create_system = 3                              # 유닛스 권한 보존: 맥에서 .command 가 실행되려면 필요
+                zi.external_attr = (0o755 if arc.endswith((".sh", ".command")) else 0o644) << 16
+                zf.writestr(zi, data)
     return out, len(entries)
 
 
 if __name__ == "__main__":
     rl, rw, tv = requirements()
-    for t in ("linux", "windows-server"):
+    for t in ("linux", "windows-server", "mac"):
         path, n = build(t, rl, rw, tv)
         print(f"{os.path.basename(path)}  파일 {n}개  {os.path.getsize(path) / 2**20:.1f} MB")

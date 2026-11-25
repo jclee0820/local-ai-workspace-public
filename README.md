@@ -41,6 +41,10 @@ Docker·WSL 없이 네이티브 Python 가상환경으로 설치됩니다.
   - "Windows의 PC 보호" 창이 뜨면 **추가 정보 → 실행** 을 누르세요(코드 서명 인증서가 없는 무료 배포 파일이라 뜨는 경고입니다).
   - 설치 후 바탕화면 **'로컬 AI 작업실'** 아이콘을 누르면 브라우저에서 열립니다. 끄기·다시 설치·제거는 시작 메뉴 '로컬 AI 작업실' 폴더에 있습니다.
   - 설치 파일 만들기: `python packaging/build_desktop_installer.py` → `dist/` (Inno Setup 6 필요)
+- **맥북 (Apple 실리콘 M1 이후)**: [릴리스](../../releases/latest)에서 `LocalAIWorkspace-<버전>-mac.zip` 을 받아 압축을 풀고 `설치하기.command` 를 우클릭 → 열기
+  - 관리자 암호 필요 없음. 모두 홈 폴더(`~/LocalAIWorkspace`)에 설치되고, Python(uv)·라이브러리·Ollama·언어 모델(메모리에 맞춰 자동)을 인터넷으로 받습니다.
+  - 설치가 끝나면 바탕화면 **'로컬 AI 작업실'** 아이콘(끄기 아이콘 포함)이 생깁니다. 처음 한 번 '확인되지 않은 개발자' 경고가 뜨면 우클릭 → 열기.
+  - 한컴오피스가 없어 구형 `.hwp` 파일은 못 읽습니다(HWPX·PDF는 가능). 인텔 맥은 지원하지 않습니다. 실제 맥에서의 설치 시험은 아직 하지 못했습니다(미확인).
 - **개발용 실행**: `start_workspace.bat` (Python 3.12 가상환경 `.venv`, Ollama 필요)
 - **서버 (리눅스·Windows Server)**: [packaging/docs/INSTALL.md](packaging/docs/INSTALL.md)
   - 설치 패키지 만들기: `python packaging/build_packages.py` → `dist/`
