@@ -89,11 +89,18 @@ def wiki_image(title, lang="ko", size=500):
     return ""
 
 
+GENERIC = {"영화", "드라마", "애니메이션", "애니", "책", "도서", "소설", "게임", "음악", "노래", "앨범", "만화", "웹툰",
+           "시리즈", "작품", "뉴스", "제품", "공연", "뮤지컬", "방송", "예능"}   # 분류 이름 — 이것만으로는 특정 문서를 찾지 않음
+ADULT = re.compile(r"포르노|성인\s*영화|에로|음란|porn|adult film", re.I)
+
+
 def _title_score(t, request, qual):
     s = 3 if qual and qual in t else 0
     s -= 4 * sum(1 for m in MEDIA if m in t.lower() and m not in request)
     if "동음이의" in t or "disambiguation" in t.lower():
         s -= 5
+    if ADULT.search(t) and not ADULT.search(request):      # 요청하지 않은 성인물 문서는 제외
+        s -= 20
     return s
 
 
@@ -109,7 +116,8 @@ def collect(request, ko_query, core, en_query="", qual="", progress=None, max_ko
         for t in wiki_search(q, "ko"):
             if t not in ko and pat.search(t.lower()):     # '랫팩듄' 처럼 단어 일부만 겹치는 문서 제외
                 ko.append(t)
-    if re.search(r"시리즈|영화|드라마|애니메이션|작품|연대|연표|순서|에피소드", request):   # 작품 목록형 요청: 매체별로 더 찾음
+    if core not in GENERIC and re.search(r"시리즈|영화|드라마|애니메이션|작품|연대|연표|순서|에피소드", request):   # 작품 목록형 요청: 매체별로 더 찾음
+        # (주제어가 '영화' 자체면 '영화 영화'·'영화 시리즈' 검색이 아무 영화 문서나 끌어와서 제외)
         for suf in ("에피소드", "영화", "드라마", "애니메이션", "시리즈"):
             q = f"{core} {suf}"
             say(f"📚 위키백과 검색(ko): {q}")
@@ -133,7 +141,7 @@ def collect(request, ko_query, core, en_query="", qual="", progress=None, max_ko
             ok = lambda t: first in t.lower()
         en = [t for t in wiki_search(en_query, "en") if ok(t) and _title_score(t, request, qual) > -4][:max_en]
     people = []
-    if re.search(r"주인공|등장\s*인물|인물|캐릭터", request):     # 인물 요청: 등장인물 문서(제목에 주제어가 없어도 본문 첫 단락에 있으면)
+    if core not in GENERIC and re.search(r"주인공|등장\s*인물|인물|캐릭터", request):     # 인물 요청: 등장인물 문서(제목에 주제어가 없어도 본문 첫 단락에 있으면)
         for q in (f"{core} 등장인물", f"{core} 주인공", f"{core} 캐릭터"):
             say(f"📚 위키백과 검색(ko): {q}")
             for t in wiki_search(q, "ko", n=10):
@@ -169,6 +177,8 @@ def collect(request, ko_query, core, en_query="", qual="", progress=None, max_ko
             continue
         secs = split_sections(text)
         intro = secs[0][1][:600] if secs else ""
+        if (ADULT.search(title) or ADULT.search(intro[:200])) and not ADULT.search(request):
+            continue                                          # 요청하지 않은 성인물 문서
         if kind == "work":                                    # 후보 작품: 첫 단락에 주제어와 연도가 있는 영화·드라마·애니메이션이어야
             if not any(n in intro for n in names) or not re.search(r"\d{4}년", intro) \
                     or not re.search(r"영화|드라마|시리즈|애니메이션|작품", intro[:250]) or "동음이의" in title:

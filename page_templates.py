@@ -10,6 +10,7 @@
 모든 틀: 디자인 트렌드(design_trends) 적용, 표지 3D 배경 선택, 인터넷 없이 열리는 단일 HTML."""
 import datetime
 import html
+import io
 import json
 import re
 import urllib.parse
@@ -352,11 +353,12 @@ def build_topic(form, chat_fn, progress=None, history=False):
 LIST_SYS = """아래 [자료]는 '{cat}' 관련 웹 검색 결과이다. 자료에 '구체적인 이름'으로 등장하는 항목(제품·작품·장소·기관 등)을 찾아라.
 - 자료에 글자 그대로 나온 이름만. 기억·추측 금지. 일반 명사·분류명은 항목이 아니다. 같은 대상의 변형(세대·색상)은 하나로.
 - 여러 자료에 반복 등장하는 대표 항목 우선. 최대 {n}개.
-- name 은 자료 표기 그대로, name_en 은 영어 이름(이미지 검색용, 모르면 ""), maker 는 만든 곳·주체(자료에 있을 때).
+- name 은 자료 표기 그대로(자료에 한국어 이름·한국 개봉 제목이 있으면 그것을), name_en 은 영어 이름(이미지 검색용, 모르면 ""), maker 는 만든 곳·주체(자료에 있을 때).{extra}
 출력 JSON: {{"items":[{{"name":"","name_en":"","maker":""}}]}}"""
 
 ITEM_SYS = """아래 [자료]만 근거로 '{name}' 의 정보를 JSON 으로 정리한다. 자료에 없으면 빈 문자열. 추측·기억 금지.
-- attrs: 다음 비교 항목마다 값(자료 표기 그대로, 단위 포함)과 근거(자료에서 글자 그대로 복사한 10~40자): {attrs}
+- attrs: 다음 비교 항목마다 값(단위 포함)과 근거(자료에서 글자 그대로 복사한 10~40자): {attrs}
+  값은 한국어로 쓴다. 자료가 영어면 뜻을 옮기고 사람 이름은 한국어 표기로 적는다(근거 evidence 만 원문 그대로).
 - summary: 한 줄 소개(40자 이내, 자료 근거). features: 특징 2~3개, 각 {{"text":"20~40자","evidence":"자료 원문 10~40자"}}
 - kind: 한 단어 분류(자료에서 알 수 있을 때).
 출력 JSON: {{"summary":"","kind":"","attrs":{{"항목명":{{"value":"","evidence":""}}}},"features":[{{"text":"","evidence":""}}]}}"""
@@ -365,27 +367,100 @@ PHOTO_Q = ("'{name}'({maker}) 를 대표하는 사진을 찾고 있다(제품이
            "이 이미지가 그런 사진인가? 글자가 많은 광고·인포그래픽·로고만 있는 그림·다른 대상이면 no.\n형식: 한 줄 설명 | yes 또는 no")
 
 
-def _item_photo(it, cat_en, chat_fn):
+POSTER_Q = ("이 이미지를 보고 세 줄로만 답하라.\n"
+            "제목: <크게 적힌 작품 제목 글자를 보이는 그대로(한국어·영어), 없으면 없음>\n"
+            "종류: <영화 포스터 / 드라마 포스터 / 책 표지 / 행사 사진 / 굿즈 / 기타 중 하나>\n"
+            "글자: <제목 말고 보이는 날짜·개봉 시기·배우·감독 이름 글자를 보이는 대로, 없으면 없음>")
+
+
+def _poster_check(out, it):
+    """POSTER_Q 답 → (제목 일치, 포스터 종류, 이 작품 정보(개봉일·배우)와 일치). 같은 제목의 다른 작품·책 표지를 거르기 위함."""
+    lines = {m.group(1): m.group(2).strip() for m in re.finditer(r"(제목|종류|글자)\s*[:：]\s*(.*)", out or "")}
+    title_ok = _title_match(lines.get("제목", ""), [it["name"], it.get("name_en", "")])
+    kind_ok = "포스터" in lines.get("종류", "")
+    text = re.sub(r"\s+", "", lines.get("글자", "") + lines.get("제목", ""))
+    known = []                                           # 이미 조사한 개봉일·배우·감독
+    for a, v in (it.get("attrs") or {}).items():
+        if re.search(r"주연|출연|배우|감독|연출", a):
+            known += [re.sub(r"\s+", "", n) for n in re.split(r"[,，·/]", re.sub(r"\(.*?\)|\s*(외|등)\s*$", "", str(v))) if len(n.strip()) >= 2]
+        elif re.search(r"개봉|출시|방영|공개", a):
+            d = _item_date({"attrs": {a: v}}, datetime.date.today().year)
+            if d:
+                known += [f"{d.month}월{d.day}일", f"{d.month}.{d.day}", f"{d.month:02d}.{d.day:02d}", f"{d.month}/{d.day}",
+                          f"{d.month}월", f"{d.year}"]          # 작은 글씨 배우 이름을 못 읽어도 개봉 연·월이 보이면 인정
+    extra_ok = not known or any(k and k in text for k in known)
+    return title_ok, kind_ok, extra_ok
+
+
+def _title_match(read, names):
+    """포스터에서 읽은 제목이 작품 이름(한국어·영어)과 맞는지 — 공백·기호 무시, 한쪽이 다른 쪽을 포함하거나 글자 70% 이상 겹침."""
+    r = re.sub(r"[\s\W_]+", "", read or "").lower()
+    if len(r) < 2:
+        return False
+    for n in names:
+        k = re.sub(r"[\s\W_]+", "", re.sub(r"\(.*?\)|극장판", "", n or "")).lower()
+        if len(k) < 2:
+            continue
+        if k in r or (len(r) >= 2 and r in k and len(r) >= len(k) * 0.5):
+            return True
+        if sum(1 for ch in set(k) if ch in r) / len(set(k)) >= 0.7 and len(k) >= 3:
+            return True
+    return False
+
+
+def _item_photo(it, cat_en, chat_fn, used=None, work=False):
+    """항목 사진. work=True(영화·드라마 등)면 포스터에 적힌 제목을 AI가 읽어 작품 이름과 맞을 때만 채택
+    (예전엔 '포스터인가?'만 물어서 다른 영화 '군체' 포스터가 정가네·폭설에 들어갔음). used: 이 페이지에서 이미 쓴 그림(중복 금지).
+    작품 포스터는 검색어를 바꿔 가며 최대 3번 찾는다."""
+    used = used if used is not None else set()
+    if not work:
+        return _item_photo_once(it, cat_en, chat_fn, used, False, None)
+    year = datetime.date.today().year
+    for q in (f"{it['name']} {cat_en} 메인 포스터", f"{it['name']} 포스터", f"{it['name']} {year} {cat_en} 포스터"):
+        _item_photo_once(it, cat_en, chat_fn, used, True, q.strip())
+        if it.get("image"):
+            return
+
+
+def _item_photo_once(it, cat_en, chat_fn, used, work, query):
+    import hashlib
     import llm_client
     import product_builder as pb
     try:
         from ddgs import DDGS
     except ImportError:
         from duckduckgo_search import DDGS
-    q = it.get("name_en") or f"{it['name']} {cat_en}".strip()
-    toks = [t for t in re.split(r"[\s()/,:-]+", q.lower()) if len(t) >= 2]
+    if work:
+        q = query
+        toks = [re.sub(r"[\s\W_]+", "", it["name"]).lower()]                    # 이미지 제목·주소에 작품 이름이 있어야
+        if it.get("name_en"):
+            toks.append(re.sub(r"[\s\W_]+", "", it["name_en"]).lower())
+    else:
+        q = it.get("name_en") or f"{it['name']} {cat_en}".strip()
+        toks = [t for t in re.split(r"[\s()/,:-]+", q.lower()) if len(t) >= 2]
     vision = llm_client.supports_vision()
     try:
         with DDGS() as d:
-            rows = d.images(q, max_results=15) or []
+            rows = d.images(q, max_results=20) or []
     except Exception:
         return
-    tried = 0
+    tried, fallback = 0, None
+    if work:                                             # 정식 포스터는 세로형 — 검색 결과의 크기 정보로 세로형을 먼저 봄
+        def _num(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+        rows = sorted(rows, key=lambda r: -(1 if _num(r.get("height")) >= 1.25 * max(_num(r.get("width")), 1) else 0))
     for r in rows:
         url, title = r.get("image") or "", (r.get("title") or "").lower()
         if not url or re.search(r"logo|icon|\.svg|\.gif|sprite", url.lower()):
             continue
-        if toks and sum(t in title or t in url.lower() for t in toks) < max(1, len(toks) // 3):
+        if work:
+            hay = re.sub(r"[\s\W_]+", "", title + urllib.parse.unquote(url) + urllib.parse.unquote(r.get("url") or "")).lower()
+            if not any(t and t in hay for t in toks):
+                continue
+        elif toks and sum(t in title or t in url.lower() for t in toks) < max(1, len(toks) // 3):
             continue
         try:
             uri = pb._to_data_uri(url, r.get("url") or "")
@@ -393,27 +468,95 @@ def _item_photo(it, cat_en, chat_fn):
             uri = ""
         if not uri:
             continue
+        h = hashlib.sha1(uri.encode()).hexdigest()
+        if h in used:
+            continue
         tried += 1
         if vision:
             try:
-                out = chat_fn([{"role": "user", "content": PHOTO_Q.format(name=it.get("name_en") or it["name"], maker=it.get("maker", "")),
-                                "images": [uri.split(",", 1)[1]]}], {"temperature": 0, "num_predict": 60, "num_ctx": 4096})
-                if not out.strip().lower().rstrip(".").endswith("yes"):
-                    if tried >= 4:
-                        return
+                if work:
+                    out = chat_fn([{"role": "user", "content": POSTER_Q, "images": [uri.split(",", 1)[1]]}],
+                                  {"temperature": 0, "num_predict": 120, "num_ctx": 4096})
+                    title_ok, kind_ok, extra_ok = _poster_check(out, it)
+                    ok = title_ok and extra_ok            # 제목 + (이 작품의 개봉일·배우 중 하나) 가 보여야 — 같은 제목 다른 작품·책 표지 차단
+                    if ok and not kind_ok:
+                        ok = False
+                        fallback = fallback or None      # 포스터가 아닌 그림(행사 사진·굿즈)은 가로형 후보로도 안 씀
+                else:
+                    out = chat_fn([{"role": "user", "content": PHOTO_Q.format(name=it.get("name_en") or it["name"], maker=it.get("maker", "")),
+                                    "images": [uri.split(",", 1)[1]]}], {"temperature": 0, "num_predict": 60, "num_ctx": 4096})
+                    ok = out.strip().lower().rstrip(".").endswith("yes")
+                if not ok:
+                    if tried >= (8 if work else 4):
+                        break
                     continue
             except Exception:
                 continue
-        it["image"] = uri
-        it["image_credit"] = re.sub(r"^www\.", "", urllib.parse.urlparse(r.get("url") or url).netloc)
+        credit = re.sub(r"^www\.", "", urllib.parse.urlparse(r.get("url") or url).netloc)
+        if work:
+            from PIL import Image
+            import base64
+            w_, h_ = Image.open(io.BytesIO(base64.b64decode(uri.split(",", 1)[1]))).size
+            if h_ < 1.25 * w_:                           # 제목은 맞지만 가로형(행사 사진·굿즈·로고) → 세로형 포스터를 더 찾아보고, 없을 때만 씀
+                fallback = fallback or (uri, credit, h)
+                continue
+        used.add(h)
+        it["image"], it["image_credit"] = uri, credit
         return
+    if work and fallback:
+        it.setdefault("_fallback_img", fallback)                  # 위키백과 대표 그림도 없을 때 쓸 가로형 후보
+
+
+WORKS = re.compile(r"영화|드라마|애니|시리즈|소설|책|도서|게임|앨범|공연|뮤지컬|웹툰")
+
+
+def _wiki_work_image(it, cat):
+    """작품 이름으로 위키백과(한국어→영어) 문서를 찾아, 첫 단락이 그 분야 작품일 때만 대표 그림을 씀
+    ('폭설' 같은 이름이 날씨 문서의 사진을 가져오지 않게)."""
+    import fact_research as fr
+    import product_builder as pb
+    kind = (WORKS.search(cat) or [""])[0]
+    for lang, name in (("ko", it["name"]), ("ko", f"{it['name']} ({kind})"), ("en", it.get("name_en") or "")):
+        if not name:
+            continue
+        title, intro = fr.wiki_page(name, lang, intro_only=True)
+        head = intro[:300]
+        ok = re.search(r"영화|드라마|애니메이션|소설|게임|앨범" if lang == "ko" else r"film|series|novel|game|album", head, re.I)
+        if not intro or not ok or "동음이의" in title or "disambiguation" in head.lower():
+            continue
+        url = fr.wiki_image(title, lang)
+        uri = pb._to_data_uri(url, f"https://{lang}.wikipedia.org/") if url else ""
+        if uri:
+            it["image"], it["image_credit"] = uri, f"{lang}.wikipedia.org"
+            return True
+    return False
+
+
+def _item_date(it, year):
+    """항목의 개봉·출시일 → date. '2026년 11월 6일', '2026.11.05', '11월 18일', '12/30' 형식. 못 읽으면 None."""
+    for a, v in it.get("attrs", {}).items():
+        if not re.search(r"개봉|출시|방영|공개|일정|날짜|일자", a):
+            continue
+        s = str(v)
+        m = re.search(r"(\d{4})\s*[.년/-]\s*(\d{1,2})\s*[.월/-]\s*(\d{1,2})", s) or \
+            re.search(r"()(\d{1,2})\s*월\s*(\d{1,2})\s*일", s) or re.search(r"()(\d{1,2})\s*[./]\s*(\d{1,2})(?!\d)", s)
+        if m:
+            try:
+                return datetime.date(int(m.group(1) or year), int(m.group(2)), int(m.group(3)))
+            except ValueError:
+                pass
+        m = re.search(r"(?:(\d{4})\s*년\s*)?(\d{1,2})\s*월", s)          # '12월 중', '2026년 12월 개봉 예정' → 그 달 15일로 봄
+        if m and 1 <= int(m.group(2)) <= 12:
+            return datetime.date(int(m.group(1) or year), int(m.group(2)), 15)
+    return None
 
 
 def build_list(form, chat_fn, progress=None):
     import product_builder as pb
     say = progress or (lambda f, m: None)
     cat = form["topic"].strip()
-    attrs = [a.strip() for a in re.split(r"[,，/·]", form.get("attrs") or "") if a.strip()][:6] or ["특징"]
+    attrs = [a.strip() for a in re.split(r"[,，/·]", form.get("attrs") or "") if a.strip()
+             and not re.search(r"포스터|사진|이미지|그림|썸네일", a)][:6] or ["특징"]   # 사진류는 '항목 사진'으로 따로 붙임
     n = int(form.get("n") or 6)
     year = datetime.date.today().year
     say(0.03, "🔑 검색어 만드는 중…")
@@ -424,7 +567,8 @@ def build_list(form, chat_fn, progress=None):
     cat_en = (d.get("category_en") or "").strip()
     qs = [q for q in (d.get("queries") or []) if isinstance(q, str)][:3] or [f"{cat} {year}", f"{cat} 순위 비교", f"{cat} {' '.join(attrs[:2])}"]
     say(0.08, f"🔎 웹 검색: {', '.join(qs)}")
-    docs = pb._search_docs(qs + [q for q in (d.get("queries_en") or []) if isinstance(q, str)][:2], n=6) + pb._search_docs(qs[:1], n=5, news=True)
+    qen = [] if form.get("ko_only") else [q for q in (d.get("queries_en") or []) if isinstance(q, str)][:2]   # 국내 목록이면 영어 검색 안 함(미국 개봉작이 섞였음)
+    docs = pb._search_docs(qs + qen, n=6) + pb._search_docs(qs[:2], n=6, news=True)
     seen, pool = set(), []
     for x in docs:
         if x["url"] not in seen:
@@ -435,7 +579,12 @@ def build_list(form, chat_fn, progress=None):
     say(0.2, f"📰 검색 결과 {len(pool)}건 — 항목 추리는 중…")
     blob = "\n\n".join(f"({x['source']}) {x['text'][:1100]}" for x in pool[:9])[:7500]
     try:
-        li = pb._json(chat_fn, LIST_SYS.format(cat=cat, n=n + 2), f"[자료]\n{blob}", num_predict=600)
+        extra = ("\n- 한국(국내) 기준 목록이다. 국내에 개봉·출시되는 항목만, 이름은 한국어 제목으로. 외국에서만 나온 항목은 넣지 않는다."
+                 if form.get("ko_only") else "")
+        if form.get("current") or form.get("month"):
+            extra += f"\n- 오늘은 {datetime.date.today():%Y년 %m월 %d일}이다. 지난 해·몇 달 전 글에 나온 예전 항목은 넣지 않는다."
+        n_cand = n + (6 if (form.get("month") or form.get("current")) else 2)   # 최신 목록은 날짜로 걸러지므로 후보를 넉넉히
+        li = pb._json(chat_fn, LIST_SYS.format(cat=cat, n=n_cand, extra=extra), f"[자료]\n{blob}", num_predict=800)
     except Exception:
         li = {}
     allsrc = pb._norm(" ".join(x["text"] for x in pool))
@@ -447,15 +596,50 @@ def build_list(form, chat_fn, progress=None):
             keys.add(k)
             items.append({"name": name, "name_en": (it.get("name_en") or "").strip(), "maker": (it.get("maker") or "").strip()})
     ks = [pb._norm(i["name"]) for i in items]
-    items = [i for i, k in zip(items, ks) if not any(o != k and o in k for o in ks)][:n]
+    items = [i for i, k in zip(items, ks) if not any(o != k and o in k for o in ks)]
+    if form.get("month") or form.get("current"):         # 작품별 조사(오래 걸림) 전에, 검색 본문에서 이름 근처 날짜로 다른 달·예전 작품을 미리 거름
+        today = datetime.date.today()
+        def _snip_dates(name):
+            ds = []
+            for x in pool:
+                t = x.get("text", "")
+                for mm in re.finditer(re.escape(name), t):
+                    w = t[max(0, mm.start() - 60): mm.end() + 120]
+                    for dm in re.finditer(r"(?:(\d{4})\s*[.년]\s*)?(\d{1,2})\s*[.월]\s*(\d{1,2})\s*일?", w):
+                        try:
+                            ds.append(datetime.date(int(dm.group(1) or today.year), int(dm.group(2)), int(dm.group(3))))
+                        except ValueError:
+                            pass
+            return ds
+        keep, pre_drop = [], []
+        for it in items:
+            ds = _snip_dates(it["name"])
+            if form.get("month"):
+                bad = bool(ds) and not any(d.month == form["month"] and d.year == today.year for d in ds)
+            else:
+                bad = bool(ds) and not any(today - datetime.timedelta(days=120) <= d <= today + datetime.timedelta(days=7) for d in ds)
+            (pre_drop if bad else keep).append(it)
+        if pre_drop and len(keep) >= 2:
+            say(0.28, "🗓️ 검색 본문 날짜로 미리 제외: " + ", ".join(i["name"] for i in pre_drop))
+            items = keep
+    items = items[:n]
     if not items:
         raise RuntimeError("검색 결과에서 구체적인 항목 이름을 찾지 못했습니다. 대상을 더 구체적으로 적어 주세요.")
     say(0.3, "📦 항목: " + ", ".join(i["name"] for i in items))
     sources = []
     for i, it in enumerate(items):
         say(0.3 + 0.6 * i / len(items), f"🧾 [{i + 1}/{len(items)}] {it['name']} 정보 확인 중…")
-        dd = pb._search_docs([f"{it['name']} {' '.join(attrs[:3])}", f"{it['name']} {cat_en}".strip()], n=4)
-        ctx, picked = pb._windows(dd + pool, [it["name"]], total=4200)
+        timely = form.get("current") or form.get("month")
+        kind_w = (WORKS.search(cat) or [""])[0]
+        if timely:                                       # 같은 이름의 다른 작품(예: 예전 드라마 '최종면접') 자료가 섞이지 않게 연도·분야를 붙여 찾고,
+            dd = pb._search_docs([f"{it['name']} {year} {kind_w} {' '.join(attrs[:3])}".strip(),   # 그 연도가 나오는 자료만 씀
+                                  f"{it['name']} {kind_w} {year} 개봉".strip()], n=5)
+            dd = [x for x in dd if str(year) in x.get("text", "")] or dd
+            pool_i = [x for x in pool if str(year) in x.get("text", "")]
+        else:
+            dd = pb._search_docs([f"{it['name']} {' '.join(attrs[:3])}", f"{it['name']} {cat_en}".strip()], n=4)
+            pool_i = pool
+        ctx, picked = pb._windows(dd + pool_i, [it["name"]], total=4200)
         it.update(attrs={}, features=[], summary="", kind="")
         if len(ctx) >= 120:
             try:
@@ -469,6 +653,12 @@ def build_list(form, chat_fn, progress=None):
                     continue
                 val = str(v["value"]).strip()[:60]
                 ok = pb._price_ok(val, ctx) if re.search(r"\d", val) else pb._evidence_ok(v.get("evidence", ""), srcn)
+                if ok and re.search(r"주연|출연|배우|감독|성우|캐스트|연출", a) and re.search(r"[가-힣]", val):
+                    names = [n.strip() for n in re.split(r"[,，·/]|\s외$|\s등$", re.sub(r"\(.*?\)|\s*(외|등)\s*$", "", val)) if len(n.strip()) >= 2]
+                    hit = sum(1 for n in names if pb._norm(n) in srcn)
+                    ok = bool(names) and hit >= max(1, round(len(names) * 0.6))   # 사람 이름은 자료 본문에 실제로 나와야(다른 작품 출연진 차단)
+                    if ok and hit < len(names):
+                        val = ", ".join(n for n in names if pb._norm(n) in srcn)
                 if ok:
                     it["attrs"][a] = val                                       # 숫자는 원문에 그 숫자가 있어야, 글은 근거 구절이 있어야 채택
             if pb._evidence_ok(r.get("summary", ""), srcn) or (r.get("summary") and len(r.get("features") or []) and any(
@@ -481,11 +671,50 @@ def build_list(form, chat_fn, progress=None):
                     sources.append({"title": p["title"][:70] or p["source"], "url": p["url"]})
         if form.get("photos", True):
             say(0.3 + 0.6 * (i + 0.6) / len(items), f"📷 [{i + 1}/{len(items)}] {it['name']} 사진 찾는 중…")
+            used = form.setdefault("_used_imgs", set())  # 한 페이지(두 묶음 포함) 안에서 같은 그림 재사용 금지
+            is_work = bool(WORKS.search(cat))
             try:
-                _item_photo(it, cat_en, chat_fn)
+                _item_photo(it, (WORKS.search(cat)[0] if is_work else cat_en), chat_fn, used=used, work=is_work)
             except Exception:
                 pass
+            if not it.get("image") and is_work:          # 작품이면 위키백과 문서 대표 그림(포스터)으로 보충
+                try:
+                    if _wiki_work_image(it, cat):
+                        import hashlib
+                        h = hashlib.sha1(it["image"].encode()).hexdigest()
+                        if h in used:
+                            it.pop("image", None)
+                        else:
+                            used.add(h)
+                except Exception:
+                    pass
+            fb = it.pop("_fallback_img", None)
+            if not it.get("image") and fb and fb[2] not in used:   # 마지막: 제목은 맞는 가로형 그림
+                it["image"], it["image_credit"] = fb[0], fb[1]
+                used.add(fb[2])
     items = [it for it in items if it["attrs"] or it["features"] or it.get("image")]
+    mon, cur = form.get("month"), form.get("current")
+    if mon or cur:                                       # 날짜로 거르기: 'N월 개봉 예정'은 그 달만, '현재 상영 중'은 최근 넉 달 안
+        today = datetime.date.today()
+        for it in items:
+            it["_date"] = _item_date(it, today.year)
+        def _bad(it):
+            dt_ = it["_date"]
+            if not dt_:
+                return None                              # 날짜 확인 안 됨
+            if mon:
+                return dt_.month != mon
+            return dt_ > today + datetime.timedelta(days=7) or dt_ < today - datetime.timedelta(days=120)
+        dropped = [it["name"] for it in items if _bad(it)]
+        items = [it for it in items if not _bad(it)]
+        sure = [it for it in items if it["_date"]]
+        if len(sure) >= 3:                               # 날짜가 확인된 항목이 충분하면, 날짜를 모르는 항목(예전 글에서 온 것일 수 있음)도 뺌
+            dropped += [it["name"] for it in items if not it["_date"]]
+            items = sure
+        if dropped:
+            why = f"{mon}월 개봉이 아니거나 개봉일 미확인" if mon else "지금 상영 기간이 아니거나 개봉일 미확인"
+            say(0.94, f"🗓️ {why} — 제외: {', '.join(dropped)}")
+        items.sort(key=lambda it: it["_date"] or today)
     say(0.95, "🎨 페이지 구성 중…")
     secs = []
     cards = [{"title": it["name"], "sub": " · ".join(f"{a} {v}" for a, v in list(it["attrs"].items())[:2]) or it.get("maker"), "img": it.get("image")} for it in items]
@@ -708,9 +937,86 @@ BUILDERS = {"topic": lambda f, c, p: build_topic(f, c, p), "history": lambda f, 
             "list": build_list, "org": build_org, "report": build_report, "event": build_event}
 
 
+TIMELY = re.compile(r"현재(?!\s*까지)|지금(?!\s*까지)|요즘|최신|이번\s*(주|달|달에)|다음\s*달|상영\s*중|개봉\s*(중|예정|작|할)|방영\s*(중|예정)|"
+                    r"출시\s*(예정|된)|판매\s*중|박스\s*오피스|신작|\d{4}\s*년\s*\d{1,2}\s*월|\d{1,2}\s*월\s*(개봉|출시|방영|상영)")
+REROUTE_SYS = """사용자의 웹페이지 요청을 '웹 검색으로 찾을 목록' 묶음으로 바꾼다. 오늘은 {today} 이다.
+- groups: 요청에 들어 있는 목록 묶음(최대 2개). 예: '11월 현재 상영작과 12월 개봉 예정작' → 2개.
+  topic 은 검색에 쓸 짧은 대상 설명(연도·월 포함, 예: '2026년 11월 현재 국내 극장 상영 중인 영화'), heading 은 섹션 제목(예: '지금 상영 중').
+  요청에 나라·지역이 없으면 한국(국내) 기준으로 topic 에 '국내'를 넣는다.
+- attrs: 항목마다 비교할 정보 3~5개(요청에 나온 것 우선). 영화면 개봉일을 반드시 넣고, 보통 개봉일, 감독, 주연, 줄거리. 포스터·사진은 넣지 않는다(따로 붙임).
+- title: 페이지 제목(20자 이내, '만들어줘' 같은 지시어 없이).
+출력 JSON: {{"title":"","groups":[{{"topic":"","heading":""}}],"attrs":[""]}}"""
+
+
+def _reroute_timely(kind, form, chat_fn, progress):
+    """'현재 상영 중', '12월 개봉 예정', '2026년 11월' 같은 시의성 있는 목록 요청이 위키백과 틀(주제·연표)로 들어오면
+    웹 검색 틀(목록·비교)로 돌린다. 위키백과에는 최신 개봉작이 없어서, 예전엔 주제어가 '영화'로 잡혀
+    도가니·명량·스타워즈 같은 옛 영화로 채워진 페이지가 나왔음."""
+    say = progress or (lambda f, m: None)
+    req = " ".join(x for x in (form.get("topic", ""), form.get("focus", "")) if x).strip()
+    say(0.01, "🧭 최신 목록 요청 — 위키백과 대신 실시간 웹 검색으로 만듭니다")
+    import product_builder as pb
+    try:
+        d = pb._json(chat_fn, REROUTE_SYS.format(today=datetime.date.today().isoformat()), req, num_predict=300, num_ctx=2048)
+    except Exception:
+        d = {}
+    groups = [g for g in (d.get("groups") or []) if isinstance(g, dict) and str(g.get("topic") or "").strip()][:2] or \
+        [{"topic": req[:60], "heading": ""}]
+    attrs = ", ".join(str(a).strip() for a in (d.get("attrs") or []) if str(a).strip())[:80] or \
+        ("개봉일, 감독, 주연, 줄거리" if re.search(r"영화", req) else "특징")
+    if re.search(r"영화|드라마|애니|개봉|상영|방영|출시|공연", req) and not re.search(r"개봉|출시|방영|공개|일정|날짜|일자", attrs):
+        attrs = ("출시일" if re.search(r"출시|게임|제품", req) else "방영일" if re.search(r"방영|드라마", req) else "개봉일") \
+            + ", " + attrs                                   # 날짜가 있어야 '현재 상영·N월 개봉'을 거를 수 있음(빠지면 예전 작품이 섞였음)
+    foreign = re.search(r"미국|북미|해외|일본|중국|영국|할리우드|글로벌|세계|전\s*세계", req)
+    n = 8 if len(groups) == 1 else 6
+    pages, used_imgs = [], set()
+    for gi, g in enumerate(groups):
+        sub = (lambda f, m, gi=gi: say((gi + f) / len(groups), (f"[{gi + 1}/{len(groups)}] " if len(groups) > 1 else "") + m))
+        lf = {"topic": g["topic"].strip(), "attrs": attrs, "n": n, "photos": True, "carousel": True, "hero": form.get("hero", "particles"),
+              "_used_imgs": used_imgs}                   # 두 묶음이 같은 그림을 쓰지 않게 공유
+        mm = re.search(r"(\d{1,2})\s*월", g["topic"])
+        if re.search(r"현재|지금|상영\s*중|방영\s*중|판매\s*중", g["topic"]):
+            lf["current"] = True                         # 지금 상영 중 → 개봉 전·넉 달 넘은 작품 제외
+        elif mm and re.search(r"예정|개봉하는|개봉작|개봉|출시|방영|공개", g["topic"]):
+            lf["month"] = int(mm.group(1))               # 'N월 개봉 예정' → 다른 달 개봉작 제외
+        if not foreign:
+            lf["ko_only"] = True                         # 국내 기준: 한국어 검색어만, 한국어 제목
+        try:
+            pages.append((g, build_list(lf, chat_fn, sub)))
+        except Exception as e:
+            pages.append((g, ({"sections": [], "sources": []}, {"error": str(e)})))
+    secs, sources, removed = [], [], 0
+    for g, (pg, meta) in pages:
+        head = (g.get("heading") or g["topic"]).strip()
+        for s in pg.get("sections", []):
+            s = dict(s)
+            if len(pages) > 1:                         # 묶음이 둘이면 섹션 제목 앞에 묶음 이름 (조사 대상 문구는 빼서 짧게)
+                hd = str(s.get("heading") or "").replace(f"{g['topic'].strip()} — ", "")
+                s["heading"] = f"{head} · {hd}".rstrip(" ·")
+                s["nav"] = f"{head[:6]} {s.get('nav') or ''}".strip()
+            secs.append(s)
+        for x in pg.get("sources", []):
+            if x.get("url") not in {y.get("url") for y in sources}:
+                sources.append(x)
+        removed += meta.get("removed", 0) if isinstance(meta, dict) else 0
+    title = str(d.get("title") or "").strip()
+    if not title or len(title) > 30 or REQ_WORDS.search(title):
+        title = " · ".join((g.get("heading") or g["topic"]).strip() for g, _ in pages) if len(pages) > 1 else \
+            (pages[0][0]["topic"] if pages else req[:30])
+    page = {"title": title, "tagline": f"{datetime.date.today():%Y년 %m월 %d일} 기준 웹 검색 결과로 정리했습니다", "eyebrow": "NOW",
+            "hero": form.get("hero", "particles"), "sections": secs, "sources": sources,
+            "note": "웹 검색 자료를 근거로 로컬 AI가 정리했습니다. 개봉일·출연진은 바뀔 수 있으니 예매처에서 확인하세요. 사진 저작권은 각 출처에 있습니다."}
+    errs = [m.get("error") for _, (_, m) in pages if isinstance(m, dict) and m.get("error")]
+    return page, {"removed": removed, "context": "", "sources": sources, "rerouted": "list",
+                  "groups": [g["topic"] for g, _ in pages], "errors": errs}
+
+
 def build(kind, form, chat_fn, progress=None, trend=None):
     """반환: {'html','page','meta'} — page 를 보관하면 디자인 트렌드만 바꿔 즉시 다시 그릴 수 있다."""
-    page, meta = BUILDERS[kind](form, chat_fn, progress)
+    if kind in ("topic", "history") and TIMELY.search(" ".join((form.get("topic", ""), form.get("focus", "")))):
+        page, meta = _reroute_timely(kind, form, chat_fn, progress)
+    else:
+        page, meta = BUILDERS[kind](form, chat_fn, progress)
     if not page.get("sections"):
         raise RuntimeError("자료에서 페이지에 넣을 내용을 찾지 못했습니다. 입력을 바꾸거나 자료를 추가해 주세요.")
     return {"html": render(page, trend), "page": page, "meta": meta, "kind": kind}

@@ -882,6 +882,11 @@ if PAGE == "web":
                 res["trend"] = tsel
                 SS.results["html"], SS.results["web_tpl"] = res["html"], res
                 stt.update(label=f"✅ 완료 — 섹션 {len(res['page']['sections'])}개", state="complete")
+                if res.get("meta", {}).get("rerouted"):
+                    st.info("최신 목록 요청이라 위키백과 대신 **실시간 웹 검색(목록·비교 틀)** 으로 만들었습니다 — "
+                            + " / ".join(res["meta"].get("groups") or []))
+                for _e in res.get("meta", {}).get("errors") or []:
+                    st.warning(f"일부 묶음을 만들지 못했습니다: {_e}")
             except Exception as e:
                 stt.update(label=f"⚠️ 실패: {e}", state="error")
     _tp = SS.results.get("web_tpl")

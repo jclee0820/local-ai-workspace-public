@@ -78,15 +78,24 @@ def set_model(name: str):
 _CAPS = {}
 
 
-def supports_vision(model: str = None) -> bool:
+def _caps(model: str = None):
+    """Ollama 가 알려 주는 모델 기능 목록(vision·thinking·tools 등). 모델별로 한 번만 물어봄."""
     m = model or MODEL
     if m not in _CAPS:
         try:
-            _CAPS[m] = "vision" in requests.post(f"{OLLAMA_URL}/api/show", json={"model": m}, timeout=5).json().get(
-                "capabilities", [])
+            _CAPS[m] = requests.post(f"{OLLAMA_URL}/api/show", json={"model": m}, timeout=5).json().get("capabilities", [])
         except Exception:
-            return False
+            return []
     return _CAPS[m]
+
+
+def supports_vision(model: str = None) -> bool:
+    return "vision" in _caps(model)
+
+
+def supports_thinking(model: str = None) -> bool:
+    m = model or MODEL
+    return "thinking" in _caps(m) or any(k in m for k in ("qwen3", "gpt-oss", "gemma4", "deepseek-r1", "inkling"))
 
 
 def runner_memory_gb() -> float:
@@ -161,8 +170,8 @@ def chat(messages, options=None, stream_callback=None, keep_alive="10m", fmt=Non
                "options": opts, "keep_alive": keep_alive}
     if fmt:
         payload["format"] = fmt      # "json" → JSON 형식 강제
-    if any(k in MODEL for k in ("qwen3", "gpt-oss", "gemma4", "deepseek-r1")):
-        payload["think"] = False   # 추론(thinking) 출력 끄기: 속도·문체 안정
+    if supports_thinking(MODEL):
+        payload["think"] = False   # 추론(thinking) 출력 끄기: 속도·문체 안정 (Ollama 가 'thinking' 기능이 있다고 알려 주는 모델 모두)
     text = ""
     meta = {}
     with requests.post(f"{OLLAMA_URL}/api/chat", json=payload, stream=True, timeout=(10, 900)) as r:

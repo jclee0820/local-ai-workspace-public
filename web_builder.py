@@ -392,7 +392,7 @@ LAYOUT_RULE = {
 }
 
 
-YEAR_RE = re.compile(r"(\d{4})년(?:\s*\d{1,2}월(?:\s*\d{1,2}일)?)?(?:부터|에)?\s*(?:미국에서\s*)?(개봉 예정|개봉|공개|방영|출판|출간|발매)")
+YEAR_RE = re.compile(r"(\d{4})년(?!대)(?:\s*\d{1,2}월(?:\s*\d{1,2}일)?)?(?:부터|에)?\s*(?:미국에서\s*)?(개봉 예정|개봉|공개|방영|출판|출간|발매)")
 
 
 def timeline_from_pages(pages, core):
@@ -405,7 +405,9 @@ def timeline_from_pages(pages, core):
         intro = p["sections"][0][1][:400]
         m = YEAR_RE.search(intro)
         if not m:                                     # '1980년 미국의 서사 스페이스 오페라 영화' 처럼 수식어가 긴 경우까지
-            m2 = re.search(r"(\d{4})년[^.\n]{0,40}?(영화|드라마|애니메이션|텔레비전 시리즈|웹 시리즈)", intro)
+            m2 = re.search(r"(\d{4})년(?!대)[^.\n]{0,25}?(영화|드라마|애니메이션|텔레비전 시리즈|웹 시리즈)이다", intro) or \
+                re.search(r"(\d{4})년(?!대)[^.\n]{0,40}?(영화|드라마|애니메이션|텔레비전 시리즈|웹 시리즈)", intro)
+            # ('1980년대 … 배경으로 한 2003년 … 영화이다' → 1980년대는 배경 시대이므로 건너뛰고 2003년을 씀)
             if not m2:
                 continue
             year, verb = m2.group(1), ("방영" if m2.group(2) in ("드라마", "텔레비전 시리즈", "웹 시리즈") else "개봉")
@@ -488,7 +490,9 @@ def build(request: str, chat_fn, progress=None, use_research=True, extra_context
             q.update(core=base, qual=qual.group(1) if qual else "", ko=f"{base} {qual.group(1)}" if qual else base)
         say(0.08, f"🔑 검색어: {q['ko']} / {q['en']}")
         cand = {}
-        if re.search(r"시리즈|영화|드라마|애니메이션|작품|연대|연표|순서|에피소드|주인공|등장\s*인물|인물|캐릭터", request):
+        if q["core"] in fact_research.GENERIC:            # 주제어가 '영화'처럼 분류 이름뿐이면 작품 후보로 넓히지 않음
+            say(0.1, f"⚠️ 주제어가 '{q['core']}'(분류 이름)뿐이라 특정 작품·인물 문서는 찾지 않습니다")
+        elif re.search(r"시리즈|영화|드라마|애니메이션|작품|연대|연표|순서|에피소드|주인공|등장\s*인물|인물|캐릭터", request):
             say(0.1, "🗒️ 찾아볼 작품·인물 후보 정리 중…")      # 제목에 주제어가 없는 문서(제국의 역습·루크 스카이워커 등)까지 찾기 위한 후보
             try:                                              # (후보일 뿐 — 위키백과 문서 첫 단락으로 진짜 그 작품·인물인지 확인 후 사용)
                 cand = json.loads(chat_fn([{"role": "system", "content": CAND_SYS.format(core=q["core"], en=q.get("en_core", ""))},
